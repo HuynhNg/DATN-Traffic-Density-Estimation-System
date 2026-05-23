@@ -1,0 +1,26 @@
+@import url("https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Space Grotesk", "Sora", sans-serif;
+  color: #0b1220;
+}
+
+body {
+  min-height: 100vh;
+  background: radial-gradient(circle at top left, #ffffff 0%, #f5f7fc 60%, #e8edff 100%);
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(226, 232, 255, 0.8);
+  backdrop-filter: blur(12px);
+}
+
+.dot-grid {
+  background-image: radial-gradient(rgba(37, 99, 235, 0.15) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
