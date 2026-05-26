@@ -4,6 +4,8 @@ import base64
 import time
 import os
 import uuid
+import shutil
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -31,6 +33,34 @@ from app.services.video_jobs import VideoJobStore, process_video
 router = APIRouter(prefix="/api")
 
 
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_VIDEO_TYPES = {
+    "video/mp4",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "video/webm",
+}
+ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+
+
+def _validate_upload(
+    file: UploadFile,
+    allowed_types: set[str],
+    allowed_exts: set[str],
+    label: str,
+) -> None:
+    content_type = (file.content_type or "").lower()
+    suffix = Path(file.filename or "").suffix.lower()
+    if content_type in allowed_types:
+        return
+    if suffix in allowed_exts:
+        return
+    allowed = ", ".join(sorted(allowed_exts))
+    raise HTTPException(status_code=400, detail=f"Unsupported {label} type. Allowed: {allowed}")
+
+
 # Resolve shared inference engine from router state.
 async def get_engine() -> InferenceEngine:
     return router.engine  # type: ignore[attr-defined]
@@ -50,6 +80,7 @@ async def detect_image(
     conf: bool = True,
     engine: InferenceEngine = Depends(get_engine),
 ) -> dict[str, Any]:
+    _validate_upload(file, ALLOWED_IMAGE_TYPES, ALLOWED_IMAGE_EXTS, "image")
     start = time.perf_counter()
     content = await file.read()
     np_arr = np.frombuffer(content, dtype=np.uint8)
@@ -78,12 +109,14 @@ async def upload_video(
     labels: bool = True,
     conf: bool = True,
 ) -> dict[str, Any]:
+    _validate_upload(file, ALLOWED_VIDEO_TYPES, ALLOWED_VIDEO_EXTS, "video")
     os.makedirs(settings.save_dir, exist_ok=True)
     temp_id = str(uuid.uuid4())
-    input_path = os.path.join(settings.save_dir, f"{temp_id}_{file.filename}")
+    safe_name = Path(file.filename).name if file.filename else "upload.bin"
+    input_path = os.path.join(settings.save_dir, f"{temp_id}_{safe_name}")
 
     with open(input_path, "wb") as f:
-        f.write(await file.read())
+        shutil.copyfileobj(file.file, f)
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():

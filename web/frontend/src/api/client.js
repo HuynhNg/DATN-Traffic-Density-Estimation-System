@@ -1,5 +1,6 @@
 // Resolve API base URL from environment or fall back to local dev server.
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+export const API_BASE =
+  import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 // Upload an image and request detection results.
 export async function detectImage(file, { labels, conf }) {

@@ -5,6 +5,9 @@ import DetectionList from "../components/DetectionList.jsx";
 
 // Image upload mode with detection preview and analytics.
 export default function ImageMode() {
+  const allowedImageTypes = ["image/jpeg", "image/png", "image/webp"];
+  const allowedImageExts = [".jpg", ".jpeg", ".png", ".webp"];
+
   const [file, setFile] = useState(null);
   const [image, setImage] = useState(null);
   const [detections, setDetections] = useState([]);
@@ -12,6 +15,7 @@ export default function ImageMode() {
   const [labels, setLabels] = useState(true);
   const [conf, setConf] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   // Build a data URL for the annotated image.
   const preview = useMemo(() => (image ? `data:image/jpeg;base64,${image}` : null), [image]);
@@ -20,6 +24,15 @@ export default function ImageMode() {
   async function handleUpload(e) {
     const selected = e.target.files?.[0];
     if (!selected) return;
+    const ext = selected.name.toLowerCase().slice(selected.name.lastIndexOf("."));
+    const isAllowed =
+      allowedImageTypes.includes(selected.type) ||
+      (ext && allowedImageExts.includes(ext));
+    if (!isAllowed) {
+      setError("Unsupported image type. Use JPG, PNG, or WEBP.");
+      return;
+    }
+    setError(null);
     setFile(selected);
     setLoading(true);
 
@@ -49,7 +62,12 @@ export default function ImageMode() {
           <div className="flex items-center gap-3">
             <label className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-white">
               Upload Image
-              <input type="file" accept="image/*" className="hidden" onChange={handleUpload} />
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                className="hidden"
+                onChange={handleUpload}
+              />
             </label>
             <button
               className="rounded-full border border-slate-200 px-4 py-2 text-sm"
@@ -66,6 +84,7 @@ export default function ImageMode() {
         </div>
 
         <div className="mt-6 flex h-[520px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white/70">
+          {error && <p className="text-rose-500">{error}</p>}
           {loading && <p className="text-slate-400">Processing...</p>}
           {!loading && preview && (
             <img src={preview} alt="Detection" className="max-h-full rounded-2xl shadow-lg" />

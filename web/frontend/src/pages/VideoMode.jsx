@@ -1,11 +1,20 @@
 import { useEffect, useRef, useState } from "react";
-import { getVideoStatus, uploadVideo } from "../api/client.js";
+import { API_BASE, getVideoStatus, uploadVideo } from "../api/client.js";
 import Toggle from "../components/Toggle.jsx";
 import StatCard from "../components/StatCard.jsx";
 import ChartPanel from "../components/ChartPanel.jsx";
 
 // Video upload mode with MJPEG preview and analytics.
 export default function VideoMode() {
+  const allowedVideoTypes = [
+    "video/mp4",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "video/webm"
+  ];
+  const allowedVideoExts = [".mp4", ".mov", ".avi", ".mkv", ".webm"];
+
   const previewRef = useRef(null);
 
   const [labels, setLabels] = useState(true);
@@ -18,6 +27,7 @@ export default function VideoMode() {
   const [annotating, setAnnotating] = useState(false);
   const [targetFps, setTargetFps] = useState(12);
   const [streamUrl, setStreamUrl] = useState(null);
+  const [error, setError] = useState(null);
 
   // Poll job status for progress and live metrics.
   useEffect(() => {
@@ -63,6 +73,15 @@ export default function VideoMode() {
   async function handleVideoUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    const ext = file.name.toLowerCase().slice(file.name.lastIndexOf("."));
+    const isAllowed =
+      allowedVideoTypes.includes(file.type) ||
+      (ext && allowedVideoExts.includes(ext));
+    if (!isAllowed) {
+      setError("Unsupported video type. Use MP4, MOV, AVI, MKV, or WEBM.");
+      return;
+    }
+    setError(null);
     stopAnnotatedStream();
     if (uploadedUrl) {
       URL.revokeObjectURL(uploadedUrl);
@@ -86,7 +105,7 @@ export default function VideoMode() {
       conf: String(conf),
       target_fps: String(targetFps)
     });
-    setStreamUrl(`http://localhost:8000/api/video/${jobId}/stream?${params.toString()}`);
+    setStreamUrl(`${API_BASE}/api/video/${jobId}/stream?${params.toString()}`);
     setAnnotating(true);
   }
 
@@ -104,7 +123,12 @@ export default function VideoMode() {
             <div className="flex items-center gap-3">
               <label className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-white">
                 Upload Video
-                <input type="file" accept="video/*" className="hidden" onChange={handleVideoUpload} />
+                <input
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm"
+                  className="hidden"
+                  onChange={handleVideoUpload}
+                />
               </label>
               {uploadedUrl && (
                 <div className="flex items-center gap-2">
@@ -147,6 +171,7 @@ export default function VideoMode() {
           </div>
 
           <div className="mt-6 flex h-[420px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white/70">
+            {error && <p className="text-rose-500">{error}</p>}
             {streamUrl ? (
               <img src={streamUrl} alt="Annotated" className="max-h-full rounded-2xl shadow-lg" />
             ) : uploadedUrl ? (

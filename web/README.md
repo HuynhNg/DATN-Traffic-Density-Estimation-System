@@ -1,12 +1,42 @@
 # TrafficAI Realtime Vehicle Detection
 
-Production-ready web system for realtime traffic detection with YOLOv8s custom model.
+TrafficAI is a realtime traffic analytics web system built on YOLOv8 with a FastAPI backend
+and a React + Vite frontend. The backend runs inference, renders annotated frames, streams
+MJPEG previews, and tracks analytics. The frontend provides image and video workflows with
+live metrics and charts.
 
 ## Project Structure
 
-- backend/ FastAPI + YOLOv8 inference
-- frontend/ React + Vite + Tailwind
-- docs/ API documentation
+```
+code/web/
+	backend/                 FastAPI + YOLOv8 inference
+		app/
+			api/                 API route handlers
+			core/                config + logging
+			services/            inference, ROI, analytics, video jobs
+		models/                YOLO weights (best.pt)
+		storage/               uploaded + processed video artifacts
+	frontend/                React + Vite + Tailwind UI
+		src/
+			api/                 API client helpers
+			components/          shared UI widgets
+			pages/               Image + Video modes
+	docs/                    API documentation
+```
+
+## Core Features
+
+- Image detection with bounding boxes, confidence, and export
+- Video upload, background processing, and result download
+- MJPEG realtime annotated stream with FPS throttling
+- Adaptive ROI (optional) to focus inference on motion regions
+- Live analytics: FPS, average objects, and time-series charts
+
+## Supported File Types
+
+Images: JPG, PNG, WEBP
+
+Videos: MP4, MOV, AVI, MKV, WEBM
 
 ## Backend Setup
 
@@ -91,6 +121,23 @@ set APP_USE_HALF=true
 - Frame skip for offline processing is configurable via `APP_FRAME_SKIP`.
 - JPEG quality via `APP_JPEG_QUALITY`.
 - Stream resize for realtime preview via `APP_STREAM_MAX_DIM` (set 0 to disable).
+
+## Key Modules and Functions
+
+Backend
+
+- Inference: `InferenceEngine.detect()` in [code/web/backend/app/services/inference.py](code/web/backend/app/services/inference.py)
+- Video jobs: `VideoJobStore.create()` and `process_video()` in [code/web/backend/app/services/video_jobs.py](code/web/backend/app/services/video_jobs.py)
+- Adaptive ROI: `compute_adaptive_roi()` and `ROIUpdater` in [code/web/backend/app/services/adaptive_roi.py](code/web/backend/app/services/adaptive_roi.py)
+- Rendering: `render_boxes()` in [code/web/backend/app/services/renderer.py](code/web/backend/app/services/renderer.py)
+- Streaming: `/api/video/{job_id}/stream` handler in [code/web/backend/app/api/routes.py](code/web/backend/app/api/routes.py)
+
+Frontend
+
+- API client: `detectImage()`, `uploadVideo()`, `getVideoStatus()` in [code/web/frontend/src/api/client.js](code/web/frontend/src/api/client.js)
+- Image workflow: `ImageMode` in [code/web/frontend/src/pages/ImageMode.jsx](code/web/frontend/src/pages/ImageMode.jsx)
+- Video workflow: `VideoMode` in [code/web/frontend/src/pages/VideoMode.jsx](code/web/frontend/src/pages/VideoMode.jsx)
+- Charts: `ChartPanel` in [code/web/frontend/src/components/ChartPanel.jsx](code/web/frontend/src/components/ChartPanel.jsx)
 
 ## API Docs
 
