@@ -28,6 +28,11 @@ from app.services.frame_utils import resize_to_max
 from app.services.renderer import render_boxes
 from app.services.analytics import AnalyticsTracker
 from app.services.video_jobs import VideoJobStore, process_video
+from app.services.tracking import ByteTrackWrapper, detections_to_array, tracks_to_detections
+
+import logging
+
+logger = logging.getLogger("app.stream")
 
 
 router = APIRouter(prefix="/api")
@@ -219,6 +224,19 @@ async def stream_video(
         safe_target = max(1, min(int(target_fps or 12), 60))
         skip = max(1, round(source_fps / safe_target)) if source_fps else 1
         tracker = AnalyticsTracker()
+        bytetracker = None
+        last_tracked: list[dict[str, Any]] | None = None
+        track_stride = max(1, settings.bytetrack_frame_skip)
+        stream_idx = 0
+        if settings.bytetrack_enabled:
+            try:
+                bytetracker = ByteTrackWrapper(frame_rate=int(round(source_fps or 30)))
+                logger.info("ByteTrack enabled for stream job %s", job.job_id)
+            except RuntimeError:
+                logger.exception("ByteTrack failed to initialize for stream job %s", job.job_id)
+                bytetracker = None
+        else:
+            logger.info("ByteTrack disabled for stream job %s", job.job_id)
 
         while True:
             if skip > 1:
@@ -232,6 +250,9 @@ async def stream_video(
             if not ret:
                 break
 
+            stream_idx += 1
+            run_tracker = bytetracker is not None and stream_idx % track_stride == 0
+
             resized = resize_to_max(frame, settings.stream_max_dim)
             if roi_updater is not None:
                 roi_updater.push_frame(resized)
@@ -244,13 +265,31 @@ async def stream_video(
                     current_roi,
                     anchor=settings.roi_anchor,
                 )
-                annotated = render_boxes(resized, detections, labels, conf)
+                det_array = detections_to_array(detections)
+                if run_tracker:
+                    tracked = tracks_to_detections(
+                        bytetracker.update(det_array, resized),
+                        settings.class_names,
+                    )
+                    last_tracked = tracked
+                else:
+                    tracked = last_tracked or detections
+                annotated = render_boxes(resized, tracked, labels, conf)
                 if settings.roi_draw:
                     annotated = draw_roi_overlay(annotated, current_roi, alpha=settings.roi_draw_alpha)
             else:
                 detections, _ = engine.detect(resized)
-                annotated = render_boxes(resized, detections, labels, conf)
-            metrics = tracker.update(len(detections))
+                det_array = detections_to_array(detections)
+                if run_tracker:
+                    tracked = tracks_to_detections(
+                        bytetracker.update(det_array, resized),
+                        settings.class_names,
+                    )
+                    last_tracked = tracked
+                else:
+                    tracked = last_tracked or detections
+                annotated = render_boxes(resized, tracked, labels, conf)
+            metrics = tracker.update(len(tracked))
             job.live_metrics = metrics
             if job.live_series is None:
                 job.live_series = []

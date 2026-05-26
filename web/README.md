@@ -29,6 +29,7 @@ code/web/
 - Image detection with bounding boxes, confidence, and export
 - Video upload, background processing, and result download
 - MJPEG realtime annotated stream with FPS throttling
+- ByteTrack multi-object tracking via boxmot (video + stream)
 - Adaptive ROI (optional) to focus inference on motion regions
 - Live analytics: FPS, average objects, and time-series charts
 
@@ -76,6 +77,22 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 Open docs:
 
 - http://localhost:8000/docs
+
+## ByteTrack Notes
+
+- Tracking is applied in offline video processing and MJPEG streaming.
+- Metrics in `/api/video/{job_id}` are based on tracked objects (not raw detections).
+- Each tracked box is rendered with a `track_id` label when labels are enabled.
+
+Config (environment variables):
+
+```
+APP_BYTETRACK_ENABLED=true
+APP_BYTETRACK_CONF_HIGH=0.5
+APP_BYTETRACK_IOU_HIGH=0.3
+APP_BYTETRACK_TRACK_BUFFER=30
+APP_BYTETRACK_MIN_BOX_AREA=400
+```
 
 ## Frontend Setup
 

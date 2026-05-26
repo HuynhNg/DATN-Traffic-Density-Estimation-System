@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     roi_draw: bool = False
     roi_draw_alpha: float = 0.25
 
+    bytetrack_enabled: bool = True
+    bytetrack_conf_high: float = 0.5
+    bytetrack_iou_high: float = 0.3
+    bytetrack_track_buffer: int = 30
+    bytetrack_min_box_area: int = 400
+    bytetrack_frame_skip: int = 1
+
     class_names: list[str] = ["car", "truck", "bus", "motor"]
     allowed_origins: list[str] = ["*"]
 

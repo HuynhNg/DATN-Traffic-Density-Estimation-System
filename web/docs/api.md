@@ -87,6 +87,8 @@ Response:
 }
 ```
 
+Note: `live_metrics` and `analytics` use tracked object counts when ByteTrack is enabled.
+
 ## Download Processed Video
 
 `GET /api/video/{job_id}/result`

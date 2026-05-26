@@ -19,6 +19,11 @@ from app.services.adaptive_roi import (
 )
 from app.services.inference import InferenceEngine
 from app.services.renderer import render_boxes
+from app.services.tracking import ByteTrackWrapper, detections_to_array, tracks_to_detections
+
+import logging
+
+logger = logging.getLogger("app.video")
 
 
 @dataclass
@@ -94,6 +99,19 @@ def process_video(
     job.status = "processing"
 
     series: list[dict[str, Any]] = []
+    tracker = None
+    last_tracked: list[dict[str, Any]] | None = None
+    track_stride = max(1, settings.bytetrack_frame_skip)
+    if settings.bytetrack_enabled:
+        try:
+            tracker = ByteTrackWrapper(frame_rate=int(round(fps or 30)))
+            logger.info("ByteTrack enabled for offline video job %s", job.job_id)
+        except RuntimeError:
+            logger.exception("ByteTrack failed to initialize for job %s", job.job_id)
+            job.status = "failed"
+            return
+    else:
+        logger.info("ByteTrack disabled for offline video job %s", job.job_id)
     frame_idx = 0
     while True:
         ret, frame = cap.read()
@@ -105,6 +123,7 @@ def process_video(
             writer.write(frame)
             continue
 
+        run_tracker = tracker is not None and frame_idx % track_stride == 0
         if roi_updater is not None:
             roi_updater.push_frame(frame)
             current_roi = roi_updater.current
@@ -116,18 +135,30 @@ def process_video(
                 current_roi,
                 anchor=settings.roi_anchor,
             )
-            annotated = render_boxes(frame, detections, show_labels, show_conf)
+            det_array = detections_to_array(detections)
+            if run_tracker:
+                tracked = tracks_to_detections(tracker.update(det_array, frame), settings.class_names)
+                last_tracked = tracked
+            else:
+                tracked = last_tracked or detections
+            annotated = render_boxes(frame, tracked, show_labels, show_conf)
             if settings.roi_draw:
                 annotated = draw_roi_overlay(annotated, current_roi, alpha=settings.roi_draw_alpha)
         else:
             detections, _ = engine.detect(frame)
-            annotated = render_boxes(frame, detections, show_labels, show_conf)
+            det_array = detections_to_array(detections)
+            if run_tracker:
+                tracked = tracks_to_detections(tracker.update(det_array, frame), settings.class_names)
+                last_tracked = tracked
+            else:
+                tracked = last_tracked or detections
+            annotated = render_boxes(frame, tracked, show_labels, show_conf)
         writer.write(annotated)
 
         series.append(
             {
                 "frame": frame_idx,
-                "count": len(detections),
+                "count": len(tracked),
             }
         )
 
