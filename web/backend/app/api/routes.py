@@ -13,6 +13,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import settings
 from app.services.inference import InferenceEngine
+from app.services.adaptive_roi import (
+    ROIUpdater,
+    apply_roi_to_frame,
+    build_roi_config_from_settings,
+    compute_adaptive_roi,
+    draw_roi_overlay,
+    filter_detections_by_roi_xyxy,
+    remap_detections_to_original,
+)
 from app.services.frame_utils import resize_to_max
 from app.services.renderer import render_boxes
 from app.services.analytics import AnalyticsTracker
@@ -22,16 +31,19 @@ from app.services.video_jobs import VideoJobStore, process_video
 router = APIRouter(prefix="/api")
 
 
+# Resolve shared inference engine from router state.
 async def get_engine() -> InferenceEngine:
     return router.engine  # type: ignore[attr-defined]
 
 
 @router.get("/health")
+# Lightweight health check endpoint.
 async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @router.post("/image")
+# Run detection on a single image and return annotated JPEG plus metadata.
 async def detect_image(
     file: UploadFile = File(...),
     labels: bool = True,
@@ -60,6 +72,7 @@ async def detect_image(
 
 
 @router.post("/video/upload")
+# Upload a video file and enqueue background processing.
 async def upload_video(
     file: UploadFile = File(...),
     labels: bool = True,
@@ -105,6 +118,7 @@ async def upload_video(
 
 
 @router.get("/video/{job_id}")
+# Fetch processing status and metrics for a video job.
 async def get_video_status(job_id: str) -> dict[str, Any]:
     job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
     if not job:
@@ -124,6 +138,7 @@ async def get_video_status(job_id: str) -> dict[str, Any]:
 
 
 @router.get("/video/{job_id}/result")
+# Download the processed video artifact.
 async def download_video(job_id: str) -> FileResponse:
     job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
     if not job or not job.result_path:
@@ -132,6 +147,7 @@ async def download_video(job_id: str) -> FileResponse:
 
 
 @router.get("/video/{job_id}/stream")
+# Stream annotated frames as MJPEG for realtime preview.
 async def stream_video(
     job_id: str,
     labels: bool = True,
@@ -143,10 +159,28 @@ async def stream_video(
     if not job or not job.input_path:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    # Generator that yields multipart JPEG frames for MJPEG streaming.
     def frame_generator():
         cap = cv2.VideoCapture(job.input_path)
         if not cap.isOpened():
             return
+
+        roi = None
+        roi_updater: ROIUpdater | None = None
+        if settings.roi_enabled:
+            roi_config = build_roi_config_from_settings(settings)
+            calib_frames: list[np.ndarray] = []
+            while len(calib_frames) < roi_config.calib_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                calib_frames.append(resize_to_max(frame, settings.stream_max_dim))
+            if len(calib_frames) >= 2:
+                roi = compute_adaptive_roi(calib_frames, roi_config)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            if roi is not None:
+                roi_updater = ROIUpdater(roi_config, roi)
+                roi_updater.start()
 
         source_fps = cap.get(cv2.CAP_PROP_FPS) or 0
         safe_target = max(1, min(int(target_fps or 12), 60))
@@ -166,8 +200,23 @@ async def stream_video(
                 break
 
             resized = resize_to_max(frame, settings.stream_max_dim)
-            detections, _ = engine.detect(resized)
-            annotated = render_boxes(resized, detections, labels, conf)
+            if roi_updater is not None:
+                roi_updater.push_frame(resized)
+                current_roi = roi_updater.current
+                processed, offset = apply_roi_to_frame(resized, current_roi, mode=settings.roi_mode)
+                detections, _ = engine.detect(processed)
+                detections = remap_detections_to_original(detections, offset)
+                detections = filter_detections_by_roi_xyxy(
+                    detections,
+                    current_roi,
+                    anchor=settings.roi_anchor,
+                )
+                annotated = render_boxes(resized, detections, labels, conf)
+                if settings.roi_draw:
+                    annotated = draw_roi_overlay(annotated, current_roi, alpha=settings.roi_draw_alpha)
+            else:
+                detections, _ = engine.detect(resized)
+                annotated = render_boxes(resized, detections, labels, conf)
             metrics = tracker.update(len(detections))
             job.live_metrics = metrics
             if job.live_series is None:
@@ -190,6 +239,9 @@ async def stream_video(
             )
 
         cap.release()
+
+        if roi_updater is not None:
+            roi_updater.stop()
 
     return StreamingResponse(
         frame_generator(),

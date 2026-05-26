@@ -104,28 +104,3 @@ Response:
 
 `multipart/x-mixed-replace; boundary=frame`
 
-## Realtime WebSocket
-
-`WS /ws/stream`
-
-- Send binary JPEG frames.
-- Optional text control message:
-
-```json
-{"labels": true, "conf": true}
-```
-
-Server response:
-
-```json
-{
-  "image_b64": "...",
-  "detections": [],
-  "inference_ms": 10.4,
-  "metrics": {
-    "fps": 24.1,
-    "avg_objects": 3.8,
-    "objects_in_frame": 4
-  }
-}
-```

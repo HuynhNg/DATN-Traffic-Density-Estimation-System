@@ -3,6 +3,7 @@ import { detectImage } from "../api/client.js";
 import Toggle from "../components/Toggle.jsx";
 import DetectionList from "../components/DetectionList.jsx";
 
+// Image upload mode with detection preview and analytics.
 export default function ImageMode() {
   const [file, setFile] = useState(null);
   const [image, setImage] = useState(null);
@@ -11,10 +12,11 @@ export default function ImageMode() {
   const [labels, setLabels] = useState(true);
   const [conf, setConf] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [zoom, setZoom] = useState(1);
 
+  // Build a data URL for the annotated image.
   const preview = useMemo(() => (image ? `data:image/jpeg;base64,${image}` : null), [image]);
 
+  // Upload image to backend and hydrate UI with results.
   async function handleUpload(e) {
     const selected = e.target.files?.[0];
     if (!selected) return;
@@ -31,6 +33,7 @@ export default function ImageMode() {
     }
   }
 
+  // Download the annotated image as a file.
   function downloadResult() {
     if (!preview) return;
     const link = document.createElement("a");
@@ -59,29 +62,13 @@ export default function ImageMode() {
           <div className="flex items-center gap-4">
             <Toggle label="Labels" checked={labels} onChange={setLabels} />
             <Toggle label="Conf" checked={conf} onChange={setConf} />
-            <div className="flex items-center gap-2 text-sm text-slate-500">
-              <span>Zoom</span>
-              <input
-                type="range"
-                min="1"
-                max="2"
-                step="0.1"
-                value={zoom}
-                onChange={(e) => setZoom(Number(e.target.value))}
-              />
-            </div>
           </div>
         </div>
 
         <div className="mt-6 flex h-[520px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white/70">
           {loading && <p className="text-slate-400">Processing...</p>}
           {!loading && preview && (
-            <img
-              src={preview}
-              alt="Detection"
-              className="max-h-full rounded-2xl shadow-lg"
-              style={{ transform: `scale(${zoom})` }}
-            />
+            <img src={preview} alt="Detection" className="max-h-full rounded-2xl shadow-lg" />
           )}
           {!loading && !preview && <p className="text-slate-400">Upload an image to start</p>}
         </div>

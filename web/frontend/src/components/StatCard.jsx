@@ -1,3 +1,4 @@
+// Small metric card for numeric highlights.
 export default function StatCard({ title, value, trend }) {
   return (
     <div className="glass rounded-2xl px-4 py-3 shadow-soft">

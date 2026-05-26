@@ -32,7 +32,7 @@ set APP_MODEL_PATH=path\\to\\best.pt
 Run API:
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+APP_ROI_DRAW_ALPHA=0.25
 ```
 
 Run API (force GPU):
@@ -87,7 +87,6 @@ set APP_USE_HALF=true
 
 ## Realtime Notes
 
-- Webcam stream uses WebSocket and JPEG frames.
 - Upload video realtime preview uses MJPEG stream.
 - Frame skip for offline processing is configurable via `APP_FRAME_SKIP`.
 - JPEG quality via `APP_JPEG_QUALITY`.

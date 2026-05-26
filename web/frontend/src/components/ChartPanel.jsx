@@ -8,6 +8,7 @@ import {
   CartesianGrid
 } from "recharts";
 
+// Line chart for object count over time.
 export default function ChartPanel({ data }) {
   return (
     <div className="glass rounded-2xl px-4 py-4 shadow-soft">

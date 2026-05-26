@@ -16,7 +16,9 @@ except Exception:  # pragma: no cover - torch optional
     torch = None
 
 
+# YOLOv8 inference wrapper with device selection.
 class InferenceEngine:
+    # Load the YOLO model and configure runtime options.
     def __init__(self) -> None:
         self.logger = logging.getLogger("app.inference")
         model_path = settings.model_path
@@ -26,6 +28,7 @@ class InferenceEngine:
         self._configure_runtime()
         self._log_runtime(model_path)
 
+    # Choose device based on settings and availability.
     def _resolve_device(self) -> str:
         if settings.device != "auto":
             return settings.device
@@ -33,6 +36,7 @@ class InferenceEngine:
             return "cuda:0"
         return "cpu"
 
+    # Enable CUDA optimizations when available.
     def _configure_runtime(self) -> None:
         if torch is None:
             return
@@ -43,6 +47,7 @@ class InferenceEngine:
             except Exception:
                 pass
 
+    # Log runtime device and model details.
     def _log_runtime(self, model_path: str) -> None:
         if torch is None:
             self.logger.info("Runtime: device=%s model=%s", self.device, model_path)
@@ -51,6 +56,7 @@ class InferenceEngine:
         gpu_name = torch.cuda.get_device_name(0) if cuda_ok else "cpu"
         self.logger.info("Runtime: device=%s gpu=%s model=%s", self.device, gpu_name, model_path)
 
+    # Run inference and return detections with elapsed time in ms.
     def detect(self, frame: np.ndarray) -> tuple[list[dict[str, Any]], float]:
         start = time.perf_counter()
         results = self.model.predict(

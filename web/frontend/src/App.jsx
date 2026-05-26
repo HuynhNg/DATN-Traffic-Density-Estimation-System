@@ -8,6 +8,7 @@ const MODES = [
   { id: "video", label: "Video Mode" }
 ];
 
+// Top-level UI shell with mode switching.
 export default function App() {
   const [mode, setMode] = useState("image");
 

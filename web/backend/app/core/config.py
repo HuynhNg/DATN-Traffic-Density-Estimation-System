@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# Centralized configuration loaded from environment variables.
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="APP_")
 
@@ -19,8 +20,23 @@ class Settings(BaseSettings):
     stream_max_dim: int = 640
     save_dir: str = "storage"
 
+    roi_enabled: bool = False
+    roi_mode: str = "mask"
+    roi_anchor: str = "bottom_center"
+    roi_calib_frames: int = 100
+    roi_min_area_ratio: float = 0.05
+    roi_otsu_bias: float = 1.05
+    roi_morph_kernel_size: int = 15
+    roi_farneback_scale: float = 0.5
+    roi_update_interval_sec: float = 600.0
+    roi_rolling_window_size: int = 100
+    roi_max_zones: int = 2
+    roi_draw: bool = False
+    roi_draw_alpha: float = 0.25
+
     class_names: list[str] = ["car", "truck", "bus", "motor"]
     allowed_origins: list[str] = ["*"]
 
 
+# Instantiate settings at import time for app-wide use.
 settings = Settings()

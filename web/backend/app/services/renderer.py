@@ -14,6 +14,7 @@ COLOR_MAP = {
 }
 
 
+# Render bounding boxes with optional labels and confidence.
 def render_boxes(
     frame: np.ndarray,
     detections: list[dict[str, Any]],

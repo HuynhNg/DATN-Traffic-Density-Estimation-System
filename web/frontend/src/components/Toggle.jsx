@@ -1,3 +1,4 @@
+// Reusable toggle control with label.
 export default function Toggle({ label, checked, onChange }) {
   return (
     <label className="flex items-center gap-2 text-sm text-slate-600">

@@ -8,11 +8,21 @@ from typing import Any
 import cv2
 
 from app.core.config import settings
+from app.services.adaptive_roi import (
+    ROIUpdater,
+    apply_roi_to_frame,
+    build_roi_config_from_settings,
+    calibrate_roi_from_capture,
+    draw_roi_overlay,
+    filter_detections_by_roi_xyxy,
+    remap_detections_to_original,
+)
 from app.services.inference import InferenceEngine
 from app.services.renderer import render_boxes
 
 
 @dataclass
+# In-memory record for a video processing job.
 class VideoJob:
     job_id: str
     status: str
@@ -26,20 +36,25 @@ class VideoJob:
     live_series: list[dict[str, Any]] | None = None
 
 
+# Simple in-memory job registry.
 class VideoJobStore:
+    # Initialize in-memory job storage.
     def __init__(self) -> None:
         self.jobs: dict[str, VideoJob] = {}
 
+    # Create and register a new video job.
     def create(self) -> VideoJob:
         job_id = str(uuid.uuid4())
         job = VideoJob(job_id=job_id, status="queued", progress=0.0, result_path=None, analytics=None)
         self.jobs[job_id] = job
         return job
 
+    # Fetch a job by id.
     def get(self, job_id: str) -> VideoJob | None:
         return self.jobs.get(job_id)
 
 
+# Process a video file and write annotated output to disk.
 def process_video(
     engine: InferenceEngine,
     job: VideoJob,
@@ -51,6 +66,16 @@ def process_video(
     if not cap.isOpened():
         job.status = "failed"
         return
+
+    roi = None
+    roi_updater: ROIUpdater | None = None
+    if settings.roi_enabled:
+        roi_config = build_roi_config_from_settings(settings)
+        roi = calibrate_roi_from_capture(cap, roi_config)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        if roi is not None:
+            roi_updater = ROIUpdater(roi_config, roi)
+            roi_updater.start()
 
     fps = job.fps or cap.get(cv2.CAP_PROP_FPS) or 25
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
@@ -80,8 +105,23 @@ def process_video(
             writer.write(frame)
             continue
 
-        detections, _ = engine.detect(frame)
-        annotated = render_boxes(frame, detections, show_labels, show_conf)
+        if roi_updater is not None:
+            roi_updater.push_frame(frame)
+            current_roi = roi_updater.current
+            processed, offset = apply_roi_to_frame(frame, current_roi, mode=settings.roi_mode)
+            detections, _ = engine.detect(processed)
+            detections = remap_detections_to_original(detections, offset)
+            detections = filter_detections_by_roi_xyxy(
+                detections,
+                current_roi,
+                anchor=settings.roi_anchor,
+            )
+            annotated = render_boxes(frame, detections, show_labels, show_conf)
+            if settings.roi_draw:
+                annotated = draw_roi_overlay(annotated, current_roi, alpha=settings.roi_draw_alpha)
+        else:
+            detections, _ = engine.detect(frame)
+            annotated = render_boxes(frame, detections, show_labels, show_conf)
         writer.write(annotated)
 
         series.append(
@@ -96,6 +136,9 @@ def process_video(
 
     cap.release()
     writer.release()
+
+    if roi_updater is not None:
+        roi_updater.stop()
 
     job.status = "done"
     job.progress = 1.0

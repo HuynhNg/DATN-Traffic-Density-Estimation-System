@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 
+# Track FPS and object counts over time.
 class AnalyticsTracker:
     def __init__(self) -> None:
         self.last_ts = time.perf_counter()
@@ -10,6 +11,7 @@ class AnalyticsTracker:
         self.avg_objects = 0.0
         self.total_objects = 0
 
+    # Update rolling metrics with the latest frame count.
     def update(self, objects_in_frame: int) -> dict:
         now = time.perf_counter()
         self.frame_count += 1

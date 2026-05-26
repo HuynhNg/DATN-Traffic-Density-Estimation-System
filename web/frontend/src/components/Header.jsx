@@ -1,3 +1,4 @@
+// Top navigation with mode switching controls.
 export default function Header({ modes, mode, onModeChange }) {
   return (
     <header className="sticky top-0 z-20 w-full border-b border-slate-200 bg-white/80 backdrop-blur">

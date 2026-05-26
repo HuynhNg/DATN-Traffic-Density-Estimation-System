@@ -1,3 +1,4 @@
+// Render a scrollable list of detections with confidence and bounds.
 export default function DetectionList({ detections }) {
   return (
     <div className="glass h-full rounded-2xl p-4 shadow-soft">

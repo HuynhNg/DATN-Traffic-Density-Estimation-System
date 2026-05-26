@@ -32,6 +32,11 @@ yarn.lock
 Thumbs.db
 .vscode/
 
+# Environment files
+.env
+.env.*
+!.env.example
+
 # Project outputs
 stage3/stage3_output/
 v1/result/
