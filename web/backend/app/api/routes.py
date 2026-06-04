@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
-import time
+import logging
 import os
-import uuid
 import shutil
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,6 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import settings
-from app.services.inference import InferenceEngine
 from app.services.adaptive_roi import (
     ROIUpdater,
     apply_roi_to_frame,
@@ -24,14 +25,17 @@ from app.services.adaptive_roi import (
     filter_detections_by_roi_xyxy,
     remap_detections_to_original,
 )
-from app.services.frame_utils import resize_to_max
-from app.services.renderer import render_boxes
 from app.services.analytics import AnalyticsTracker
-from app.services.video_jobs import VideoJobStore, process_video
-from app.services.tracking import ByteTrackWrapper, detections_to_array, tracks_to_detections
+from app.services.frame_utils import resize_to_max
+from app.services.inference import InferenceEngine
+from app.services.renderer import render_boxes
+from app.services.tracking import (
+    ByteTrackWrapper,
+    detections_to_array,
+    tracks_to_detections,
+)
 from app.services.traffic_metrics import compute_metrics, decide_alert
-
-import logging
+from app.services.video_jobs import VideoJob, process_video
 
 logger = logging.getLogger("app.stream")
 
@@ -64,7 +68,153 @@ def _validate_upload(
     if suffix in allowed_exts:
         return
     allowed = ", ".join(sorted(allowed_exts))
-    raise HTTPException(status_code=400, detail=f"Unsupported {label} type. Allowed: {allowed}")
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unsupported {label} type. Allowed: {allowed}",
+    )
+
+
+def _encode_jpeg(frame: np.ndarray) -> bytes:
+    ok, buffer = cv2.imencode(
+        ".jpg",
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), settings.jpeg_quality],
+    )
+    if not ok:
+        raise RuntimeError("Failed to encode frame as JPEG")
+    return buffer.tobytes()
+
+
+def _save_upload(file: UploadFile) -> str:
+    os.makedirs(settings.save_dir, exist_ok=True)
+    temp_id = str(uuid.uuid4())
+    safe_name = Path(file.filename).name if file.filename else "upload.bin"
+    input_path = os.path.join(settings.save_dir, f"{temp_id}_{safe_name}")
+
+    with open(input_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    return input_path
+
+
+def _read_video_metadata(input_path: str) -> tuple[float, int]:
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        raise HTTPException(status_code=400, detail="Invalid video")
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.release()
+
+    if fps <= 0:
+        raise HTTPException(status_code=400, detail="Cannot read video FPS")
+
+    return fps, total_frames
+
+
+def _init_stream_roi(cap: cv2.VideoCapture) -> ROIUpdater | None:
+    if not settings.roi_enabled:
+        return None
+
+    roi_config = build_roi_config_from_settings(settings)
+    calib_frames: list[np.ndarray] = []
+    while len(calib_frames) < roi_config.calib_frames:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        calib_frames.append(resize_to_max(frame, settings.stream_max_dim))
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    if len(calib_frames) < 2:
+        return None
+
+    roi = compute_adaptive_roi(calib_frames, roi_config)
+    roi_updater = ROIUpdater(roi_config, roi)
+    roi_updater.start()
+    return roi_updater
+
+
+def _init_bytetracker(job_id: str, source_fps: float) -> ByteTrackWrapper | None:
+    if not settings.bytetrack_enabled:
+        logger.info("ByteTrack disabled for stream job %s", job_id)
+        return None
+
+    try:
+        tracker = ByteTrackWrapper(frame_rate=int(round(source_fps or 30)))
+        logger.info("ByteTrack enabled for stream job %s", job_id)
+        return tracker
+    except RuntimeError:
+        logger.exception("ByteTrack failed to initialize for stream job %s", job_id)
+        return None
+
+
+def _detect_stream_frame(
+    frame: np.ndarray,
+    engine: InferenceEngine,
+    roi_updater: ROIUpdater | None,
+) -> tuple[list[dict[str, Any]], np.ndarray]:
+    if roi_updater is None:
+        roi_mask = np.ones(frame.shape[:2], dtype=np.uint8) * 255
+        detections, _ = engine.detect(frame)
+        return detections, roi_mask
+
+    roi_updater.push_frame(frame)
+    current_roi = roi_updater.current
+    processed, offset = apply_roi_to_frame(frame, current_roi, mode=settings.roi_mode)
+    detections, _ = engine.detect(processed)
+    detections = remap_detections_to_original(detections, offset)
+    detections = filter_detections_by_roi_xyxy(
+        detections,
+        current_roi,
+        anchor=settings.roi_anchor,
+    )
+    return detections, current_roi.combined_mask
+
+
+def _track_stream_detections(
+    detections: list[dict[str, Any]],
+    frame: np.ndarray,
+    bytetracker: ByteTrackWrapper | None,
+    run_tracker: bool,
+    last_tracked: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if bytetracker is None:
+        return detections
+    if not run_tracker:
+        return last_tracked or detections
+
+    det_array = detections_to_array(detections)
+    return tracks_to_detections(
+        bytetracker.update(det_array, frame),
+        settings.class_names,
+    )
+
+
+def _update_live_metrics(
+    job: VideoJob,
+    tracker: AnalyticsTracker,
+    tracked: list[dict[str, Any]],
+    roi_mask: np.ndarray,
+) -> None:
+    metrics = tracker.update(len(tracked))
+    occupancy, pce_total = compute_metrics(tracked, roi_mask)
+    alert_level, alert_message = decide_alert(occupancy, pce_total)
+
+    job.live_metrics = {
+        **metrics,
+        "occupancy_pct": round(occupancy, 2),
+        "pce_count": round(pce_total, 2),
+        "alert_level": alert_level,
+        "alert_label": alert_message[0],
+        "alert_message": alert_message[1],
+    }
+
+    if job.live_series is None:
+        job.live_series = []
+    job.live_series.append(
+        {"t": time.strftime("%H:%M:%S"), "count": metrics["objects_in_frame"]}
+    )
+    job.live_series = job.live_series[-60:]
 
 
 # Resolve shared inference engine from router state.
@@ -96,8 +246,7 @@ async def detect_image(
 
     detections, infer_ms = engine.detect(frame)
     annotated = render_boxes(frame, detections, labels, conf)
-    _, buffer = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), settings.jpeg_quality])
-    b64 = base64.b64encode(buffer).decode("ascii")
+    b64 = base64.b64encode(_encode_jpeg(annotated)).decode("ascii")
     total_ms = (time.perf_counter() - start) * 1000.0
 
     return {
@@ -116,31 +265,13 @@ async def upload_video(
     conf: bool = True,
 ) -> dict[str, Any]:
     _validate_upload(file, ALLOWED_VIDEO_TYPES, ALLOWED_VIDEO_EXTS, "video")
-    os.makedirs(settings.save_dir, exist_ok=True)
-    temp_id = str(uuid.uuid4())
-    safe_name = Path(file.filename).name if file.filename else "upload.bin"
-    input_path = os.path.join(settings.save_dir, f"{temp_id}_{safe_name}")
-
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise HTTPException(status_code=400, detail="Invalid video")
-
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    cap.release()
-
-    if fps <= 0:
-        raise HTTPException(status_code=400, detail="Cannot read video FPS")
+    input_path = _save_upload(file)
+    fps, total_frames = _read_video_metadata(input_path)
 
     job = router.video_jobs.create()  # type: ignore[attr-defined]
     job.fps = fps
     job.total_frames = total_frames
     job.input_path = input_path
-
-    import asyncio
 
     asyncio.create_task(
         asyncio.to_thread(
@@ -204,130 +335,63 @@ async def stream_video(
         if not cap.isOpened():
             return
 
-        roi = None
-        roi_updater: ROIUpdater | None = None
-        if settings.roi_enabled:
-            roi_config = build_roi_config_from_settings(settings)
-            calib_frames: list[np.ndarray] = []
-            while len(calib_frames) < roi_config.calib_frames:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                calib_frames.append(resize_to_max(frame, settings.stream_max_dim))
-            if len(calib_frames) >= 2:
-                roi = compute_adaptive_roi(calib_frames, roi_config)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            if roi is not None:
-                roi_updater = ROIUpdater(roi_config, roi)
-                roi_updater.start()
-
+        roi_updater = _init_stream_roi(cap)
         source_fps = cap.get(cv2.CAP_PROP_FPS) or 0
         safe_target = max(1, min(int(target_fps or 12), 60))
         skip = max(1, round(source_fps / safe_target)) if source_fps else 1
         tracker = AnalyticsTracker()
-        bytetracker = None
+        bytetracker = _init_bytetracker(job.job_id, source_fps)
         last_tracked: list[dict[str, Any]] | None = None
         track_stride = max(1, settings.bytetrack_frame_skip)
         stream_idx = 0
-        if settings.bytetrack_enabled:
-            try:
-                bytetracker = ByteTrackWrapper(frame_rate=int(round(source_fps or 30)))
-                logger.info("ByteTrack enabled for stream job %s", job.job_id)
-            except RuntimeError:
-                logger.exception("ByteTrack failed to initialize for stream job %s", job.job_id)
-                bytetracker = None
-        else:
-            logger.info("ByteTrack disabled for stream job %s", job.job_id)
 
-        while True:
-            if skip > 1:
-                for _ in range(skip - 1):
-                    if not cap.grab():
-                        cap.release()
-                        return
-                ret, frame = cap.retrieve()
-            else:
-                ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            while True:
+                if skip > 1:
+                    for _ in range(skip - 1):
+                        if not cap.grab():
+                            return
+                    ret, frame = cap.retrieve()
+                else:
+                    ret, frame = cap.read()
+                if not ret:
+                    break
 
-            stream_idx += 1
-            run_tracker = bytetracker is not None and stream_idx % track_stride == 0
+                stream_idx += 1
+                run_tracker = bytetracker is not None and stream_idx % track_stride == 0
 
-            resized = resize_to_max(frame, settings.stream_max_dim)
-            if roi_updater is not None:
-                roi_updater.push_frame(resized)
-                current_roi = roi_updater.current
-                roi_mask = current_roi.combined_mask
-                processed, offset = apply_roi_to_frame(resized, current_roi, mode=settings.roi_mode)
-                detections, _ = engine.detect(processed)
-                detections = remap_detections_to_original(detections, offset)
-                detections = filter_detections_by_roi_xyxy(
+                resized = resize_to_max(frame, settings.stream_max_dim)
+                detections, roi_mask = _detect_stream_frame(resized, engine, roi_updater)
+                tracked = _track_stream_detections(
                     detections,
-                    current_roi,
-                    anchor=settings.roi_anchor,
+                    resized,
+                    bytetracker,
+                    run_tracker,
+                    last_tracked,
                 )
-                det_array = detections_to_array(detections)
                 if run_tracker:
-                    tracked = tracks_to_detections(
-                        bytetracker.update(det_array, resized),
-                        settings.class_names,
-                    )
                     last_tracked = tracked
-                else:
-                    tracked = last_tracked or detections
+
                 annotated = render_boxes(resized, tracked, labels, conf)
-                if settings.roi_draw:
-                    annotated = draw_roi_overlay(annotated, current_roi, alpha=settings.roi_draw_alpha)
-            else:
-                roi_mask = np.ones(resized.shape[:2], dtype=np.uint8) * 255
-                detections, _ = engine.detect(resized)
-                det_array = detections_to_array(detections)
-                if run_tracker:
-                    tracked = tracks_to_detections(
-                        bytetracker.update(det_array, resized),
-                        settings.class_names,
+                if roi_updater is not None and settings.roi_draw:
+                    annotated = draw_roi_overlay(
+                        annotated,
+                        roi_updater.current,
+                        alpha=settings.roi_draw_alpha,
                     )
-                    last_tracked = tracked
-                else:
-                    tracked = last_tracked or detections
-                annotated = render_boxes(resized, tracked, labels, conf)
-            metrics = tracker.update(len(tracked))
-            occupancy, pce_total = compute_metrics(tracked, roi_mask)
-            alert_level, alert_message = decide_alert(occupancy, pce_total)
-            job.live_metrics = metrics
-            job.live_metrics.update(
-                {
-                    "occupancy_pct": round(occupancy, 2),
-                    "pce_count": round(pce_total, 2),
-                    "alert_level": alert_level,
-                    "alert_label": alert_message[0],
-                    "alert_message": alert_message[1],
-                }
-            )
-            if job.live_series is None:
-                job.live_series = []
-            job.live_series.append(
-                {"t": time.strftime("%H:%M:%S"), "count": metrics["objects_in_frame"]}
-            )
-            job.live_series = job.live_series[-60:]
-            ok, buffer = cv2.imencode(
-                ".jpg",
-                annotated,
-                [int(cv2.IMWRITE_JPEG_QUALITY), settings.jpeg_quality],
-            )
-            if not ok:
-                continue
 
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n"
-            )
+                _update_live_metrics(job, tracker, tracked, roi_mask)
 
-        cap.release()
-
-        if roi_updater is not None:
-            roi_updater.stop()
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + _encode_jpeg(annotated)
+                    + b"\r\n"
+                )
+        finally:
+            cap.release()
+            if roi_updater is not None:
+                roi_updater.stop()
 
     return StreamingResponse(
         frame_generator(),

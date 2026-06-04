@@ -8,7 +8,10 @@ export default function DetectionList({ detections }) {
       </div>
       <div className="space-y-2 overflow-y-auto pr-2" style={{ maxHeight: 320 }}>
         {detections.map((det) => (
-          <div key={det.object_id} className="rounded-xl border border-slate-200 bg-white px-3 py-2">
+          <div
+            key={det.object_id}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2"
+          >
             <div className="flex items-center justify-between text-sm font-medium">
               <span>{det.class_name.toUpperCase()}_{det.object_id}</span>
               <span className="text-xs text-slate-500">{(det.confidence * 100).toFixed(1)}%</span>

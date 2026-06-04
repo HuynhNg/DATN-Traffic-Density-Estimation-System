@@ -3,31 +3,42 @@ import { API_BASE, getVideoStatus, uploadVideo } from "../api/client.js";
 import Toggle from "../components/Toggle.jsx";
 import StatCard from "../components/StatCard.jsx";
 import ChartPanel from "../components/ChartPanel.jsx";
+import { VIDEO_ACCEPT, isAllowedVideo } from "../utils/fileTypes.js";
+
+const PREVIEW_PANEL_CLASS =
+  "mt-6 flex h-[420px] items-center justify-center rounded-2xl border " +
+  "border-dashed border-slate-200 bg-white/70";
+
+const DEFAULT_METRICS = {
+  fps: 0,
+  avg_objects: 0,
+  objects_in_frame: 0,
+  occupancy_pct: 0,
+  pce_count: 0,
+  alert_label: "",
+  alert_message: "",
+};
+
+function getAlertTone(level) {
+  switch (level) {
+    case 1:
+      return "bg-amber-50 text-amber-800 border-amber-200";
+    case 2:
+      return "bg-orange-50 text-orange-800 border-orange-200";
+    case 3:
+      return "bg-rose-50 text-rose-800 border-rose-200";
+    default:
+      return "bg-emerald-50 text-emerald-800 border-emerald-200";
+  }
+}
 
 // Video upload mode with MJPEG preview and analytics.
 export default function VideoMode() {
-  const allowedVideoTypes = [
-    "video/mp4",
-    "video/quicktime",
-    "video/x-msvideo",
-    "video/x-matroska",
-    "video/webm"
-  ];
-  const allowedVideoExts = [".mp4", ".mov", ".avi", ".mkv", ".webm"];
-
   const previewRef = useRef(null);
 
   const [labels, setLabels] = useState(true);
   const [conf, setConf] = useState(true);
-  const [metrics, setMetrics] = useState({
-    fps: 0,
-    avg_objects: 0,
-    objects_in_frame: 0,
-    occupancy_pct: 0,
-    pce_count: 0,
-    alert_label: "",
-    alert_message: ""
-  });
+  const [metrics, setMetrics] = useState(DEFAULT_METRICS);
   const [series, setSeries] = useState([]);
   const [jobId, setJobId] = useState(null);
   const [job, setJob] = useState(null);
@@ -37,35 +48,30 @@ export default function VideoMode() {
   const [streamUrl, setStreamUrl] = useState(null);
   const [error, setError] = useState(null);
 
-  const alertTone = (() => {
-    switch (metrics.alert_level) {
-      case 1:
-        return "bg-amber-50 text-amber-800 border-amber-200";
-      case 2:
-        return "bg-orange-50 text-orange-800 border-orange-200";
-      case 3:
-        return "bg-rose-50 text-rose-800 border-rose-200";
-      default:
-        return "bg-emerald-50 text-emerald-800 border-emerald-200";
-    }
-  })();
+  const alertTone = getAlertTone(metrics.alert_level);
 
   // Poll job status for progress and live metrics.
   useEffect(() => {
     if (!jobId) return;
     const timer = setInterval(async () => {
-      const status = await getVideoStatus(jobId);
-      setJob(status);
-      if (status.live_metrics) {
-        setMetrics(status.live_metrics);
-      }
-      if (Array.isArray(status.live_series)) {
-        setSeries(status.live_series);
-      }
-      if (status.status === "done" || status.status === "failed") {
+      try {
+        const status = await getVideoStatus(jobId);
+        setJob(status);
+        if (status.live_metrics) {
+          setMetrics(status.live_metrics);
+        }
+        if (Array.isArray(status.live_series)) {
+          setSeries(status.live_series);
+        }
+        if (status.status === "done" || status.status === "failed") {
+          clearInterval(timer);
+        }
+      } catch (err) {
+        setError(err.message || "Video status failed.");
         clearInterval(timer);
       }
     }, 1500);
+
     return () => clearInterval(timer);
   }, [jobId]);
 
@@ -94,11 +100,8 @@ export default function VideoMode() {
   async function handleVideoUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const ext = file.name.toLowerCase().slice(file.name.lastIndexOf("."));
-    const isAllowed =
-      allowedVideoTypes.includes(file.type) ||
-      (ext && allowedVideoExts.includes(ext));
-    if (!isAllowed) {
+
+    if (!isAllowedVideo(file)) {
       setError("Unsupported video type. Use MP4, MOV, AVI, MKV, or WEBM.");
       return;
     }
@@ -108,13 +111,18 @@ export default function VideoMode() {
       URL.revokeObjectURL(uploadedUrl);
     }
     setUploadedUrl(URL.createObjectURL(file));
-    const data = await uploadVideo(file, { labels, conf });
-    setJobId(data.job_id);
-    setJob((prev) => ({
-      ...(prev || {}),
-      fps: data.fps,
-      total_frames: data.total_frames
-    }));
+
+    try {
+      const data = await uploadVideo(file, { labels, conf });
+      setJobId(data.job_id);
+      setJob((prev) => ({
+        ...(prev || {}),
+        fps: data.fps,
+        total_frames: data.total_frames,
+      }));
+    } catch (err) {
+      setError(err.message || "Video upload failed.");
+    }
   }
 
   // Start MJPEG stream for the current job.
@@ -124,7 +132,7 @@ export default function VideoMode() {
     const params = new URLSearchParams({
       labels: String(labels),
       conf: String(conf),
-      target_fps: String(targetFps)
+      target_fps: String(targetFps),
     });
     setStreamUrl(`${API_BASE}/api/video/${jobId}/stream?${params.toString()}`);
     setAnnotating(true);
@@ -147,7 +155,7 @@ export default function VideoMode() {
                   Upload Video
                   <input
                     type="file"
-                    accept="video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm"
+                    accept={VIDEO_ACCEPT}
                     className="hidden"
                     onChange={handleVideoUpload}
                   />
@@ -192,12 +200,21 @@ export default function VideoMode() {
               </div>
             </div>
 
-            <div className="mt-6 flex h-[420px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white/70">
+            <div className={PREVIEW_PANEL_CLASS}>
               {error && <p className="text-rose-500">{error}</p>}
               {streamUrl ? (
-                <img src={streamUrl} alt="Annotated" className="max-h-full rounded-2xl shadow-lg" />
+                <img
+                  src={streamUrl}
+                  alt="Annotated"
+                  className="max-h-full rounded-2xl shadow-lg"
+                />
               ) : uploadedUrl ? (
-                <video ref={previewRef} src={uploadedUrl} className="max-h-full rounded-2xl shadow-lg" controls />
+                <video
+                  ref={previewRef}
+                  src={uploadedUrl}
+                  className="max-h-full rounded-2xl shadow-lg"
+                  controls
+                />
               ) : (
                 <p className="text-slate-400">Upload a video to start</p>
               )}
@@ -218,7 +235,10 @@ export default function VideoMode() {
             <div className="mt-4 grid gap-3">
               <StatCard title="Avg Vehicles" value={metrics.avg_objects} />
               <StatCard title="Active Objects" value={metrics.objects_in_frame} />
-              <StatCard title="PCE Count" value={metrics.pce_count?.toFixed?.(2) ?? metrics.pce_count} />
+              <StatCard
+                title="PCE Count"
+                value={metrics.pce_count?.toFixed?.(2) ?? metrics.pce_count}
+              />
               <StatCard
                 title="Occupancy"
                 value={`${metrics.occupancy_pct?.toFixed?.(1) ?? metrics.occupancy_pct}%`}

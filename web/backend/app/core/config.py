@@ -7,6 +7,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="APP_")
 
+    host: str = "0.0.0.0"
+    port: int = 8000
+    reload: bool = True
+
     model_path: str = "models/best.pt"
     conf: float = 0.25
     iou: float = 0.45
@@ -40,7 +44,6 @@ class Settings(BaseSettings):
     bytetrack_track_buffer: int = 30
     bytetrack_min_box_area: int = 400
     bytetrack_frame_skip: int = 1
-
 
     class_names: list[str] = ["car", "truck", "bus", "motor"]
     allowed_origins: list[str] = ["*"]

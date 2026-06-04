@@ -2,12 +2,14 @@ import { useMemo, useState } from "react";
 import { detectImage } from "../api/client.js";
 import Toggle from "../components/Toggle.jsx";
 import DetectionList from "../components/DetectionList.jsx";
+import { IMAGE_ACCEPT, isAllowedImage } from "../utils/fileTypes.js";
+
+const PREVIEW_PANEL_CLASS =
+  "mt-6 flex h-[520px] items-center justify-center rounded-2xl border " +
+  "border-dashed border-slate-200 bg-white/70";
 
 // Image upload mode with detection preview and analytics.
 export default function ImageMode() {
-  const allowedImageTypes = ["image/jpeg", "image/png", "image/webp"];
-  const allowedImageExts = [".jpg", ".jpeg", ".png", ".webp"];
-
   const [file, setFile] = useState(null);
   const [image, setImage] = useState(null);
   const [detections, setDetections] = useState([]);
@@ -18,17 +20,17 @@ export default function ImageMode() {
   const [error, setError] = useState(null);
 
   // Build a data URL for the annotated image.
-  const preview = useMemo(() => (image ? `data:image/jpeg;base64,${image}` : null), [image]);
+  const preview = useMemo(
+    () => (image ? `data:image/jpeg;base64,${image}` : null),
+    [image]
+  );
 
   // Upload image to backend and hydrate UI with results.
   async function handleUpload(e) {
     const selected = e.target.files?.[0];
     if (!selected) return;
-    const ext = selected.name.toLowerCase().slice(selected.name.lastIndexOf("."));
-    const isAllowed =
-      allowedImageTypes.includes(selected.type) ||
-      (ext && allowedImageExts.includes(ext));
-    if (!isAllowed) {
+
+    if (!isAllowedImage(selected)) {
       setError("Unsupported image type. Use JPG, PNG, or WEBP.");
       return;
     }
@@ -41,6 +43,8 @@ export default function ImageMode() {
       setImage(data.image_b64);
       setDetections(data.detections || []);
       setTiming({ inference: data.inference_ms, processing: data.processing_ms });
+    } catch (err) {
+      setError(err.message || "Image detection failed.");
     } finally {
       setLoading(false);
     }
@@ -64,7 +68,7 @@ export default function ImageMode() {
               Upload Image
               <input
                 type="file"
-                accept="image/jpeg,image/png,image/webp"
+                accept={IMAGE_ACCEPT}
                 className="hidden"
                 onChange={handleUpload}
               />
@@ -83,13 +87,19 @@ export default function ImageMode() {
           </div>
         </div>
 
-        <div className="mt-6 flex h-[520px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white/70">
+        <div className={PREVIEW_PANEL_CLASS}>
           {error && <p className="text-rose-500">{error}</p>}
           {loading && <p className="text-slate-400">Processing...</p>}
           {!loading && preview && (
-            <img src={preview} alt="Detection" className="max-h-full rounded-2xl shadow-lg" />
+            <img
+              src={preview}
+              alt="Detection"
+              className="max-h-full rounded-2xl shadow-lg"
+            />
           )}
-          {!loading && !preview && <p className="text-slate-400">Upload an image to start</p>}
+          {!loading && !preview && (
+            <p className="text-slate-400">Upload an image to start</p>
+          )}
         </div>
       </div>
 
@@ -104,7 +114,9 @@ export default function ImageMode() {
             </div>
             <div className="rounded-xl bg-white px-3 py-2">
               <p className="text-xs text-slate-400">Classes</p>
-              <p className="text-lg font-semibold">{new Set(detections.map((d) => d.class_name)).size}</p>
+              <p className="text-lg font-semibold">
+                {new Set(detections.map((d) => d.class_name)).size}
+              </p>
             </div>
             <div className="rounded-xl bg-white px-3 py-2">
               <p className="text-xs text-slate-400">Inference</p>

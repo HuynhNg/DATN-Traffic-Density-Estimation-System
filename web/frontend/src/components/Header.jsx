@@ -1,7 +1,9 @@
 // Top navigation with mode switching controls.
 export default function Header({ modes, mode, onModeChange }) {
   return (
-    <header className="sticky top-0 z-20 w-full border-b border-slate-200 bg-white/80 backdrop-blur">
+    <header
+      className="sticky top-0 z-20 w-full border-b border-slate-200 bg-white/80 backdrop-blur"
+    >
       <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
         <div>
           <p className="text-sm font-semibold text-slate-500">TrafficAI</p>

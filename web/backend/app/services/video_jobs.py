@@ -50,7 +50,13 @@ class VideoJobStore:
     # Create and register a new video job.
     def create(self) -> VideoJob:
         job_id = str(uuid.uuid4())
-        job = VideoJob(job_id=job_id, status="queued", progress=0.0, result_path=None, analytics=None)
+        job = VideoJob(
+            job_id=job_id,
+            status="queued",
+            progress=0.0,
+            result_path=None,
+            analytics=None,
+        )
         self.jobs[job_id] = job
         return job
 
@@ -137,7 +143,10 @@ def process_video(
             )
             det_array = detections_to_array(detections)
             if run_tracker:
-                tracked = tracks_to_detections(tracker.update(det_array, frame), settings.class_names)
+                tracked = tracks_to_detections(
+                    tracker.update(det_array, frame),
+                    settings.class_names,
+                )
                 last_tracked = tracked
             else:
                 tracked = last_tracked or detections
@@ -148,7 +157,10 @@ def process_video(
             detections, _ = engine.detect(frame)
             det_array = detections_to_array(detections)
             if run_tracker:
-                tracked = tracks_to_detections(tracker.update(det_array, frame), settings.class_names)
+                tracked = tracks_to_detections(
+                    tracker.update(det_array, frame),
+                    settings.class_names,
+                )
                 last_tracked = tracked
             else:
                 tracked = last_tracked or detections
