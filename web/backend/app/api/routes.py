@@ -29,6 +29,7 @@ from app.services.renderer import render_boxes
 from app.services.analytics import AnalyticsTracker
 from app.services.video_jobs import VideoJobStore, process_video
 from app.services.tracking import ByteTrackWrapper, detections_to_array, tracks_to_detections
+from app.services.traffic_metrics import compute_metrics, decide_alert
 
 import logging
 
@@ -257,6 +258,7 @@ async def stream_video(
             if roi_updater is not None:
                 roi_updater.push_frame(resized)
                 current_roi = roi_updater.current
+                roi_mask = current_roi.combined_mask
                 processed, offset = apply_roi_to_frame(resized, current_roi, mode=settings.roi_mode)
                 detections, _ = engine.detect(processed)
                 detections = remap_detections_to_original(detections, offset)
@@ -278,6 +280,7 @@ async def stream_video(
                 if settings.roi_draw:
                     annotated = draw_roi_overlay(annotated, current_roi, alpha=settings.roi_draw_alpha)
             else:
+                roi_mask = np.ones(resized.shape[:2], dtype=np.uint8) * 255
                 detections, _ = engine.detect(resized)
                 det_array = detections_to_array(detections)
                 if run_tracker:
@@ -290,7 +293,18 @@ async def stream_video(
                     tracked = last_tracked or detections
                 annotated = render_boxes(resized, tracked, labels, conf)
             metrics = tracker.update(len(tracked))
+            occupancy, pce_total = compute_metrics(tracked, roi_mask)
+            alert_level, alert_message = decide_alert(occupancy, pce_total)
             job.live_metrics = metrics
+            job.live_metrics.update(
+                {
+                    "occupancy_pct": round(occupancy, 2),
+                    "pce_count": round(pce_total, 2),
+                    "alert_level": alert_level,
+                    "alert_label": alert_message[0],
+                    "alert_message": alert_message[1],
+                }
+            )
             if job.live_series is None:
                 job.live_series = []
             job.live_series.append(

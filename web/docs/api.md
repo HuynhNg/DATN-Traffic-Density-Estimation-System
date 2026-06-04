@@ -73,7 +73,12 @@ Response:
   "live_metrics": {
     "fps": 12.4,
     "avg_objects": 3.1,
-    "objects_in_frame": 4
+    "objects_in_frame": 4,
+    "pce_count": 9.2,
+    "occupancy_pct": 17.3,
+    "alert_level": 1,
+    "alert_label": "BUSY",
+    "alert_message": "Traffic is increasing"
   },
   "live_series": [
     {"t": "12:00:01", "count": 4}

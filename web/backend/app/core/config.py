@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     bytetrack_min_box_area: int = 400
     bytetrack_frame_skip: int = 1
 
+
     class_names: list[str] = ["car", "truck", "bus", "motor"]
     allowed_origins: list[str] = ["*"]
 
