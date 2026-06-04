@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import settings
 from app.services.adaptive_roi import (
+    ROIConfig,
     ROIUpdater,
     apply_roi_to_frame,
     build_roi_config_from_settings,
@@ -53,6 +55,24 @@ ALLOWED_VIDEO_TYPES = {
     "video/webm",
 }
 ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+
+
+@dataclass
+class StreamROIState:
+    config: ROIConfig | None
+    updater: ROIUpdater | None = None
+    calibration_frames: list[np.ndarray] | None = None
+    failed: bool = False
+
+    @classmethod
+    def from_settings(cls) -> "StreamROIState":
+        if not settings.roi_enabled:
+            return cls(config=None)
+
+        return cls(
+            config=build_roi_config_from_settings(settings),
+            calibration_frames=[],
+        )
 
 
 def _validate_upload(
@@ -112,26 +132,35 @@ def _read_video_metadata(input_path: str) -> tuple[float, int]:
     return fps, total_frames
 
 
-def _init_stream_roi(cap: cv2.VideoCapture) -> ROIUpdater | None:
-    if not settings.roi_enabled:
+def _update_stream_roi_state(
+    state: StreamROIState,
+    frame: np.ndarray,
+    job_id: str,
+) -> ROIUpdater | None:
+    if state.config is None or state.failed:
+        return None
+    if state.updater is not None:
+        return state.updater
+
+    if state.calibration_frames is None:
+        state.calibration_frames = []
+    state.calibration_frames.append(frame.copy())
+
+    if len(state.calibration_frames) < state.config.calib_frames:
         return None
 
-    roi_config = build_roi_config_from_settings(settings)
-    calib_frames: list[np.ndarray] = []
-    while len(calib_frames) < roi_config.calib_frames:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        calib_frames.append(resize_to_max(frame, settings.stream_max_dim))
+    try:
+        roi = compute_adaptive_roi(state.calibration_frames, state.config)
+        state.updater = ROIUpdater(state.config, roi)
+        state.updater.start()
+        state.calibration_frames = None
+        logger.info("Adaptive ROI enabled for stream job %s", job_id)
+    except Exception:
+        state.failed = True
+        state.calibration_frames = None
+        logger.exception("Adaptive ROI calibration failed for stream job %s", job_id)
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    if len(calib_frames) < 2:
-        return None
-
-    roi = compute_adaptive_roi(calib_frames, roi_config)
-    roi_updater = ROIUpdater(roi_config, roi)
-    roi_updater.start()
-    return roi_updater
+    return None
 
 
 def _init_bytetracker(job_id: str, source_fps: float) -> ByteTrackWrapper | None:
@@ -335,7 +364,7 @@ async def stream_video(
         if not cap.isOpened():
             return
 
-        roi_updater = _init_stream_roi(cap)
+        roi_state = StreamROIState.from_settings()
         source_fps = cap.get(cv2.CAP_PROP_FPS) or 0
         safe_target = max(1, min(int(target_fps or 12), 60))
         skip = max(1, round(source_fps / safe_target)) if source_fps else 1
@@ -347,13 +376,7 @@ async def stream_video(
 
         try:
             while True:
-                if skip > 1:
-                    for _ in range(skip - 1):
-                        if not cap.grab():
-                            return
-                    ret, frame = cap.retrieve()
-                else:
-                    ret, frame = cap.read()
+                ret, frame = cap.read()
                 if not ret:
                     break
 
@@ -361,6 +384,11 @@ async def stream_video(
                 run_tracker = bytetracker is not None and stream_idx % track_stride == 0
 
                 resized = resize_to_max(frame, settings.stream_max_dim)
+                roi_updater = _update_stream_roi_state(
+                    roi_state,
+                    resized,
+                    job.job_id,
+                )
                 detections, roi_mask = _detect_stream_frame(resized, engine, roi_updater)
                 tracked = _track_stream_detections(
                     detections,
@@ -388,10 +416,14 @@ async def stream_video(
                     + _encode_jpeg(annotated)
                     + b"\r\n"
                 )
+
+                for _ in range(skip - 1):
+                    if not cap.grab():
+                        return
         finally:
             cap.release()
-            if roi_updater is not None:
-                roi_updater.stop()
+            if roi_state.updater is not None:
+                roi_state.updater.stop()
 
     return StreamingResponse(
         frame_generator(),

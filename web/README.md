@@ -111,7 +111,9 @@ User clicks Run AI
   -> frontend creates /api/video/{job_id}/stream URL
   -> backend reads source video frame-by-frame
   -> target_fps controls frame skipping
-  -> each streamed frame is detected, optionally tracked, rendered, and JPEG encoded
+  -> initial frames are detected full-frame while ROI calibration frames are collected
+  -> ROI filtering and overlay are applied only after enough calibration frames
+  -> each streamed frame is optionally tracked, rendered, and JPEG encoded
   -> backend updates live_metrics and live_series on the video job
   -> frontend displays MJPEG stream, live cards, alert badge, and chart
 ```
@@ -276,6 +278,11 @@ APP_ROI_UPDATE_INTERVAL_SEC=600
 APP_ROI_DRAW=true
 APP_ROI_DRAW_ALPHA=0.25
 ```
+
+For realtime stream, ROI calibration is non-blocking. The backend still detects
+and streams the initial frames normally without ROI; once `APP_ROI_CALIB_FRAMES`
+frames have been collected, ROI filtering and drawing are applied to subsequent
+frames.
 
 Set `APP_ROI_ENABLED=false` and `APP_ROI_DRAW=false` if you want to run full
 frame detection without ROI calibration or overlay drawing.
