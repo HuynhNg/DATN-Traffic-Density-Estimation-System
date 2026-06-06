@@ -47,8 +47,12 @@ web/
         traffic_metrics.py          Occupancy, PCE, and alert logic
         video_jobs.py               In-memory video jobs and offline processing
     models/
-      best.pt                       Expected YOLO weights location
+      best.pt                       PyTorch YOLO weights
+      best.onnx                     Optional exported ONNX model
+      best_fp16.engine              Optional TensorRT FP16 engine
     storage/                        Uploaded videos and processed artifacts
+    tools/
+      benchmark_models.py           Compare .pt, .onnx, and .engine speed
 
   frontend/
     .env.example                    Frontend environment sample
@@ -98,7 +102,7 @@ User selects video
   -> POST /api/video/upload
   -> backend stores source video in storage/
   -> backend creates in-memory VideoJob
-  -> process_video() runs in a background thread
+  -> process_video() runs only when APP_AUTO_PROCESS_VIDEO=true
   -> each processed frame is detected, optionally tracked, rendered, and written
   -> GET /api/video/{job_id} reports progress and analytics
   -> GET /api/video/{job_id}/result downloads the processed MP4
@@ -110,7 +114,7 @@ User selects video
 User clicks Run AI
   -> frontend creates /api/video/{job_id}/stream URL
   -> backend reads source video frame-by-frame
-  -> target_fps controls frame skipping
+  -> target_fps controls frame skipping; default is 30 to keep ByteTrack stable
   -> initial frames are detected full-frame while ROI calibration frames are collected
   -> ROI filtering and overlay are applied only after enough calibration frames
   -> each streamed frame is optionally tracked, rendered, and JPEG encoded
@@ -156,16 +160,28 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Place the YOLO model at:
+`requirements.txt` includes `onnxruntime-gpu` so the exported ONNX model can run
+through Ultralytics/ONNX Runtime. If your machine does not have a compatible
+NVIDIA GPU/CUDA setup, replace it with `onnxruntime` for CPU-only ONNX
+inference.
+
+Place the YOLO PyTorch model at:
 
 ```text
 web/backend/models/best.pt
 ```
 
-Or override the model path:
+The active model is configured by `APP_MODEL_PATH` in `web/backend/.env`. The
+current configuration uses the exported ONNX model:
+
+```text
+APP_MODEL_PATH=models/best.onnx
+```
+
+To switch back to PyTorch weights:
 
 ```bash
-set APP_MODEL_PATH=path\to\best.pt
+set APP_MODEL_PATH=models/best.pt
 ```
 
 Run the API with the short project runner:
@@ -232,6 +248,95 @@ set APP_DEVICE=cuda:0
 set APP_USE_HALF=true
 ```
 
+## Model Export
+
+The backend can load PyTorch weights (`.pt`) and Ultralytics exported models
+such as ONNX (`.onnx`) and TensorRT (`.engine`) through the same
+`APP_MODEL_PATH` setting.
+
+Recommended optimization path:
+
+```text
+best.pt -> best.onnx -> benchmark -> best_fp16.engine
+```
+
+Export ONNX:
+
+```bash
+cd web/backend
+yolo export model=models/best.pt format=onnx imgsz=640 simplify=True opset=12
+```
+
+The exported file is typically written to:
+
+```text
+web/backend/models/best.onnx
+```
+
+Then update `web/backend/.env`:
+
+```text
+APP_MODEL_PATH=models/best.onnx
+```
+
+If ONNX inference fails because the runtime is missing, install the matching
+ONNX Runtime package for your machine, for example `onnxruntime` for CPU or
+`onnxruntime-gpu` for NVIDIA GPU.
+
+Export TensorRT FP16 on the deployment GPU:
+
+```bash
+cd web/backend
+yolo export model=models/best.pt format=engine imgsz=640 half=True device=0
+```
+
+Ultralytics typically writes `models/best.engine`. If you rename it to
+`models/best_fp16.engine`, select it with:
+
+```text
+APP_MODEL_PATH=models/best_fp16.engine
+```
+
+TensorRT engine input size must match `APP_IMG_SIZE`. For example, an engine
+exported with `imgsz=640` must run with:
+
+```text
+APP_IMG_SIZE=640
+```
+
+If you want to run `APP_IMG_SIZE=960`, export a matching engine:
+
+```bash
+yolo export model=models/best.pt format=engine imgsz=960 half=True device=0
+```
+
+The backend currently selects ONNX in `web/backend/.env`:
+
+```text
+APP_MODEL_PATH=models/best.onnx
+```
+
+Benchmark available models on the same image or video:
+
+```bash
+cd web/backend
+python tools/benchmark_models.py --source path\to\sample.mp4 --device 0
+```
+
+To choose exactly which models to compare:
+
+```bash
+python tools/benchmark_models.py ^
+  --source path\to\sample.mp4 ^
+  --models models/best.pt models/best.onnx models/best_fp16.engine ^
+  --device 0 ^
+  --max-frames 120
+```
+
+Use `--device cpu` when benchmarking CPU-compatible models only. TensorRT engine
+files are GPU and TensorRT-version specific, so build `best_fp16.engine` on the
+same machine that will run the backend.
+
 ## Backend Configuration
 
 Settings are loaded from `APP_*` environment variables in `web/backend/.env`.
@@ -244,7 +349,7 @@ Common options:
 APP_HOST=0.0.0.0
 APP_PORT=8000
 APP_RELOAD=true
-APP_MODEL_PATH=models/best.pt
+APP_MODEL_PATH=models/best.onnx
 APP_CONF=0.25
 APP_IOU=0.45
 APP_IMG_SIZE=640
@@ -253,7 +358,12 @@ APP_USE_HALF=true
 APP_FRAME_SKIP=1
 APP_JPEG_QUALITY=85
 APP_STREAM_MAX_DIM=640
+APP_AUTO_PROCESS_VIDEO=false
 ```
+
+`APP_AUTO_PROCESS_VIDEO=false` avoids running offline video processing at the
+same time as the realtime MJPEG stream. Enable it only when you explicitly need
+processed MP4 files to be generated immediately after upload.
 
 ByteTrack options:
 
@@ -397,6 +507,26 @@ Response:
 }
 ```
 
+### Start Offline Video Processing
+
+```http
+POST /api/video/{job_id}/process?labels=true&conf=true
+```
+
+Starts MP4 generation for an uploaded video. This is optional when
+`APP_AUTO_PROCESS_VIDEO=false`.
+
+Response:
+
+```json
+{
+  "job_id": "uuid",
+  "status": "queued",
+  "progress": 0.0,
+  "result_url": null
+}
+```
+
 ### Download Processed Video
 
 ```http
@@ -408,7 +538,7 @@ Returns the processed MP4 file.
 ### MJPEG Stream
 
 ```http
-GET /api/video/{job_id}/stream?labels=true&conf=true&target_fps=12
+GET /api/video/{job_id}/stream?labels=true&conf=true&target_fps=30
 ```
 
 Response content type:

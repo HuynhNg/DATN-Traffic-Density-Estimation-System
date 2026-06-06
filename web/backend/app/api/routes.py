@@ -7,6 +7,7 @@ import os
 import shutil
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.core.config import settings
 from app.services.adaptive_roi import (
     ROIConfig,
+    ROIResult,
     ROIUpdater,
     apply_roi_to_frame,
     build_roi_config_from_settings,
@@ -62,6 +64,8 @@ class StreamROIState:
     config: ROIConfig | None
     updater: ROIUpdater | None = None
     calibration_frames: list[np.ndarray] | None = None
+    executor: ThreadPoolExecutor | None = None
+    future: Future[ROIResult] | None = None
     failed: bool = False
 
     @classmethod
@@ -72,7 +76,14 @@ class StreamROIState:
         return cls(
             config=build_roi_config_from_settings(settings),
             calibration_frames=[],
+            executor=ThreadPoolExecutor(max_workers=1, thread_name_prefix="stream-roi"),
         )
+
+    def stop(self) -> None:
+        if self.updater is not None:
+            self.updater.stop()
+        if self.executor is not None:
+            self.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _validate_upload(
@@ -132,6 +143,31 @@ def _read_video_metadata(input_path: str) -> tuple[float, int]:
     return fps, total_frames
 
 
+def _start_video_processing(
+    job: VideoJob,
+    labels: bool,
+    conf: bool,
+) -> None:
+    if not job.input_path:
+        raise HTTPException(status_code=400, detail="Job has no input video")
+    if job.status == "processing":
+        return
+    if job.status == "done" and job.result_path:
+        return
+
+    job.status = "queued"
+    asyncio.create_task(
+        asyncio.to_thread(
+            process_video,
+            router.engine,
+            job,
+            job.input_path,
+            labels,
+            conf,
+        )
+    )
+
+
 def _update_stream_roi_state(
     state: StreamROIState,
     frame: np.ndarray,
@@ -142,6 +178,21 @@ def _update_stream_roi_state(
     if state.updater is not None:
         return state.updater
 
+    if state.future is not None:
+        if not state.future.done():
+            return None
+        try:
+            roi = state.future.result()
+            state.updater = ROIUpdater(state.config, roi)
+            state.updater.start()
+            logger.info("Adaptive ROI enabled for stream job %s", job_id)
+        except Exception:
+            state.failed = True
+            logger.exception("Adaptive ROI calibration failed for stream job %s", job_id)
+        finally:
+            state.future = None
+        return None
+
     if state.calibration_frames is None:
         state.calibration_frames = []
     state.calibration_frames.append(frame.copy())
@@ -149,16 +200,16 @@ def _update_stream_roi_state(
     if len(state.calibration_frames) < state.config.calib_frames:
         return None
 
-    try:
-        roi = compute_adaptive_roi(state.calibration_frames, state.config)
-        state.updater = ROIUpdater(state.config, roi)
-        state.updater.start()
-        state.calibration_frames = None
-        logger.info("Adaptive ROI enabled for stream job %s", job_id)
-    except Exception:
+    if state.executor is None:
         state.failed = True
         state.calibration_frames = None
-        logger.exception("Adaptive ROI calibration failed for stream job %s", job_id)
+        logger.error("Adaptive ROI executor is not available for stream job %s", job_id)
+        return None
+
+    frames = state.calibration_frames
+    state.calibration_frames = None
+    state.future = state.executor.submit(compute_adaptive_roi, frames, state.config)
+    logger.info("Adaptive ROI calibration started for stream job %s", job_id)
 
     return None
 
@@ -302,16 +353,8 @@ async def upload_video(
     job.total_frames = total_frames
     job.input_path = input_path
 
-    asyncio.create_task(
-        asyncio.to_thread(
-            process_video,
-            router.engine,
-            job,
-            input_path,
-            labels,
-            conf,
-        )
-    )
+    if settings.auto_process_video:
+        _start_video_processing(job, labels, conf)
 
     return {"job_id": job.job_id, "fps": fps, "total_frames": total_frames}
 
@@ -336,6 +379,26 @@ async def get_video_status(job_id: str) -> dict[str, Any]:
     }
 
 
+@router.post("/video/{job_id}/process")
+# Start offline video processing for a previously uploaded video.
+async def start_video_processing(
+    job_id: str,
+    labels: bool = True,
+    conf: bool = True,
+) -> dict[str, Any]:
+    job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    _start_video_processing(job, labels, conf)
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "result_url": f"/api/video/{job_id}/result" if job.result_path else None,
+    }
+
+
 @router.get("/video/{job_id}/result")
 # Download the processed video artifact.
 async def download_video(job_id: str) -> FileResponse:
@@ -351,7 +414,7 @@ async def stream_video(
     job_id: str,
     labels: bool = True,
     conf: bool = True,
-    target_fps: int = 12,
+    target_fps: int = 30,
     engine: InferenceEngine = Depends(get_engine),
 ) -> StreamingResponse:
     job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
@@ -366,7 +429,7 @@ async def stream_video(
 
         roi_state = StreamROIState.from_settings()
         source_fps = cap.get(cv2.CAP_PROP_FPS) or 0
-        safe_target = max(1, min(int(target_fps or 12), 60))
+        safe_target = max(1, min(int(target_fps or 30), 60))
         skip = max(1, round(source_fps / safe_target)) if source_fps else 1
         tracker = AnalyticsTracker()
         bytetracker = _init_bytetracker(job.job_id, source_fps)
@@ -422,8 +485,7 @@ async def stream_video(
                         return
         finally:
             cap.release()
-            if roi_state.updater is not None:
-                roi_state.updater.stop()
+            roi_state.stop()
 
     return StreamingResponse(
         frame_generator(),

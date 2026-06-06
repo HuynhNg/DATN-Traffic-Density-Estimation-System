@@ -78,116 +78,134 @@ def process_video(
         job.status = "failed"
         return
 
-    roi = None
     roi_updater: ROIUpdater | None = None
-    if settings.roi_enabled:
-        roi_config = build_roi_config_from_settings(settings)
-        roi = calibrate_roi_from_capture(cap, roi_config)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        if roi is not None:
-            roi_updater = ROIUpdater(roi_config, roi)
-            roi_updater.start()
+    writer: cv2.VideoWriter | None = None
 
-    fps = job.fps or cap.get(cv2.CAP_PROP_FPS) or 25
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+    try:
+        if settings.roi_enabled:
+            roi_config = build_roi_config_from_settings(settings)
+            roi = calibrate_roi_from_capture(cap, roi_config)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            if roi is not None:
+                roi_updater = ROIUpdater(roi_config, roi)
+                roi_updater.start()
 
-    os.makedirs(settings.save_dir, exist_ok=True)
-    output_path = os.path.join(settings.save_dir, f"{job.job_id}.mp4")
-    writer = cv2.VideoWriter(
-        output_path,
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
+        fps = job.fps or cap.get(cv2.CAP_PROP_FPS) or 25
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
 
-    total_frames = job.total_frames or int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    job.status = "processing"
+        os.makedirs(settings.save_dir, exist_ok=True)
+        output_path = os.path.join(settings.save_dir, f"{job.job_id}.mp4")
+        writer = cv2.VideoWriter(
+            output_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+        if not writer.isOpened():
+            raise RuntimeError(f"Cannot create output video: {output_path}")
 
-    series: list[dict[str, Any]] = []
-    tracker = None
-    last_tracked: list[dict[str, Any]] | None = None
-    track_stride = max(1, settings.bytetrack_frame_skip)
-    if settings.bytetrack_enabled:
-        try:
+        total_frames = job.total_frames or int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        job.status = "processing"
+
+        series: list[dict[str, Any]] = []
+        tracker = None
+        last_tracked: list[dict[str, Any]] | None = None
+        track_stride = max(1, settings.bytetrack_frame_skip)
+        if settings.bytetrack_enabled:
             tracker = ByteTrackWrapper(frame_rate=int(round(fps or 30)))
             logger.info("ByteTrack enabled for offline video job %s", job.job_id)
-        except RuntimeError:
-            logger.exception("ByteTrack failed to initialize for job %s", job.job_id)
-            job.status = "failed"
-            return
-    else:
-        logger.info("ByteTrack disabled for offline video job %s", job.job_id)
-    frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        frame_idx += 1
-        if settings.frame_skip > 1 and frame_idx % settings.frame_skip != 0:
-            writer.write(frame)
-            continue
-
-        run_tracker = tracker is not None and frame_idx % track_stride == 0
-        if roi_updater is not None:
-            roi_updater.push_frame(frame)
-            current_roi = roi_updater.current
-            processed, offset = apply_roi_to_frame(frame, current_roi, mode=settings.roi_mode)
-            detections, _ = engine.detect(processed)
-            detections = remap_detections_to_original(detections, offset)
-            detections = filter_detections_by_roi_xyxy(
-                detections,
-                current_roi,
-                anchor=settings.roi_anchor,
-            )
-            det_array = detections_to_array(detections)
-            if run_tracker:
-                tracked = tracks_to_detections(
-                    tracker.update(det_array, frame),
-                    settings.class_names,
-                )
-                last_tracked = tracked
-            else:
-                tracked = last_tracked or detections
-            annotated = render_boxes(frame, tracked, show_labels, show_conf)
-            if settings.roi_draw:
-                annotated = draw_roi_overlay(annotated, current_roi, alpha=settings.roi_draw_alpha)
         else:
-            detections, _ = engine.detect(frame)
-            det_array = detections_to_array(detections)
-            if run_tracker:
-                tracked = tracks_to_detections(
-                    tracker.update(det_array, frame),
-                    settings.class_names,
-                )
-                last_tracked = tracked
+            logger.info("ByteTrack disabled for offline video job %s", job.job_id)
+
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_idx += 1
+            should_detect = (
+                settings.frame_skip <= 1
+                or frame_idx % settings.frame_skip == 0
+                or last_tracked is None
+            )
+
+            if should_detect:
+                run_tracker = tracker is not None and frame_idx % track_stride == 0
+                if roi_updater is not None:
+                    roi_updater.push_frame(frame)
+                    current_roi = roi_updater.current
+                    processed, offset = apply_roi_to_frame(
+                        frame,
+                        current_roi,
+                        mode=settings.roi_mode,
+                    )
+                    detections, _ = engine.detect(processed)
+                    detections = remap_detections_to_original(detections, offset)
+                    detections = filter_detections_by_roi_xyxy(
+                        detections,
+                        current_roi,
+                        anchor=settings.roi_anchor,
+                    )
+                    det_array = detections_to_array(detections)
+                    if run_tracker:
+                        tracked = tracks_to_detections(
+                            tracker.update(det_array, frame),
+                            settings.class_names,
+                        )
+                        last_tracked = tracked
+                    else:
+                        tracked = last_tracked or detections
+                    annotated = render_boxes(frame, tracked, show_labels, show_conf)
+                    if settings.roi_draw:
+                        annotated = draw_roi_overlay(
+                            annotated,
+                            current_roi,
+                            alpha=settings.roi_draw_alpha,
+                        )
+                else:
+                    detections, _ = engine.detect(frame)
+                    det_array = detections_to_array(detections)
+                    if run_tracker:
+                        tracked = tracks_to_detections(
+                            tracker.update(det_array, frame),
+                            settings.class_names,
+                        )
+                        last_tracked = tracked
+                    else:
+                        tracked = last_tracked or detections
+                    annotated = render_boxes(frame, tracked, show_labels, show_conf)
             else:
-                tracked = last_tracked or detections
-            annotated = render_boxes(frame, tracked, show_labels, show_conf)
-        writer.write(annotated)
+                tracked = last_tracked or []
+                annotated = render_boxes(frame, tracked, show_labels, show_conf)
 
-        series.append(
-            {
-                "frame": frame_idx,
-                "count": len(tracked),
-            }
-        )
+            writer.write(annotated)
 
-        if total_frames > 0:
-            job.progress = min(frame_idx / total_frames, 1.0)
+            series.append(
+                {
+                    "frame": frame_idx,
+                    "count": len(tracked),
+                }
+            )
 
-    cap.release()
-    writer.release()
+            if total_frames > 0:
+                job.progress = min(frame_idx / total_frames, 1.0)
 
-    if roi_updater is not None:
-        roi_updater.stop()
-
-    job.status = "done"
-    job.progress = 1.0
-    job.result_path = output_path
-    avg = sum(s["count"] for s in series) / max(len(series), 1)
-    job.analytics = {
-        "avg_objects": round(avg, 2),
-        "series": series[-200:],
-    }
+        job.status = "done"
+        job.progress = 1.0
+        job.result_path = output_path
+        avg = sum(s["count"] for s in series) / max(len(series), 1)
+        job.analytics = {
+            "avg_objects": round(avg, 2),
+            "series": series[-200:],
+        }
+    except Exception:
+        logger.exception("Video job %s failed", job.job_id)
+        job.status = "failed"
+    finally:
+        cap.release()
+        if writer is not None:
+            writer.release()
+        if roi_updater is not None:
+            roi_updater.stop()

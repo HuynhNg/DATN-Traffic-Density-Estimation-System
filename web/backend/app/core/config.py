@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     jpeg_quality: int = 85
     stream_max_dim: int = 640
     save_dir: str = "storage"
+    auto_process_video: bool = False
 
     roi_enabled: bool = False
     roi_mode: str = "mask"

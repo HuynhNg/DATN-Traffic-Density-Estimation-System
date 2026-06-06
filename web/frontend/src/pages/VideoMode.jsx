@@ -44,7 +44,7 @@ export default function VideoMode() {
   const [job, setJob] = useState(null);
   const [uploadedUrl, setUploadedUrl] = useState(null);
   const [annotating, setAnnotating] = useState(false);
-  const [targetFps, setTargetFps] = useState(12);
+  const [targetFps, setTargetFps] = useState(30);
   const [streamUrl, setStreamUrl] = useState(null);
   const [error, setError] = useState(null);
 
@@ -107,10 +107,15 @@ export default function VideoMode() {
     }
     setError(null);
     stopAnnotatedStream();
+    setJobId(null);
+    setJob(null);
+    setMetrics(DEFAULT_METRICS);
+    setSeries([]);
     if (uploadedUrl) {
       URL.revokeObjectURL(uploadedUrl);
     }
-    setUploadedUrl(URL.createObjectURL(file));
+    const nextPreviewUrl = URL.createObjectURL(file);
+    setUploadedUrl(nextPreviewUrl);
 
     try {
       const data = await uploadVideo(file, { labels, conf });
@@ -122,6 +127,8 @@ export default function VideoMode() {
       }));
     } catch (err) {
       setError(err.message || "Video upload failed.");
+      setUploadedUrl(null);
+      URL.revokeObjectURL(nextPreviewUrl);
     }
   }
 
@@ -160,7 +167,7 @@ export default function VideoMode() {
                     onChange={handleVideoUpload}
                   />
                 </label>
-                {uploadedUrl && (
+                {jobId && (
                   <div className="flex items-center gap-2">
                     <button
                       className={`rounded-full px-3 py-2 text-sm ${

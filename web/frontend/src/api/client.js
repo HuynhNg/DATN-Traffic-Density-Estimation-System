@@ -54,3 +54,14 @@ export async function getVideoStatus(jobId) {
   await assertOk(res, "Video status failed");
   return res.json();
 }
+
+// Start offline video processing for a previously uploaded video.
+export async function startVideoProcessing(jobId, { labels, conf }) {
+  const params = new URLSearchParams({ labels, conf });
+  const res = await fetch(
+    `${API_BASE}/api/video/${jobId}/process?${params.toString()}`,
+    { method: "POST" }
+  );
+  await assertOk(res, "Video processing failed");
+  return res.json();
+}

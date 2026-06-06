@@ -25,8 +25,8 @@ def compute_metrics(tracks: list[dict[str, Any]], roi_mask: np.ndarray) -> tuple
     if roi_area <= 0:
         return 0.0, 0.0
 
-    occupied_pixels = 0.0
     pce_total = 0.0
+    occupied_mask = np.zeros_like(roi_mask, dtype=np.uint8)
 
     h, w = roi_mask.shape[:2]
     for track in tracks:
@@ -39,13 +39,14 @@ def compute_metrics(tracks: list[dict[str, Any]], roi_mask: np.ndarray) -> tuple
             continue
 
         crop = roi_mask[y1:y2, x1:x2]
-        occupied_pixels += float(np.sum(crop > 0))
+        occupied_mask[y1:y2, x1:x2] = np.where(crop > 0, 255, occupied_mask[y1:y2, x1:x2])
 
         cx = int((x1 + x2) / 2)
         cy = int((y1 + y2) / 2)
         if 0 <= cy < h and 0 <= cx < w and roi_mask[cy, cx] > 0:
             pce_total += _pce_weight(track.get("class_name", ""))
 
+    occupied_pixels = float(np.sum(occupied_mask > 0))
     occupancy = occupied_pixels / roi_area * 100.0
     return occupancy, pce_total
 

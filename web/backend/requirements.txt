@@ -1,10 +1,11 @@
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
---index-url https://download.pytorch.org/whl/cu118
+--extra-index-url https://download.pytorch.org/whl/cu118
 torch
 torchvision
 torchaudio
 ultralytics>=8.2.0
+onnxruntime-gpu>=1.18.0
 opencv-python>=4.10.0
 numpy>=1.26.0,<2
 pydantic>=2.6.0
