@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { API_BASE, getVideoStatus, uploadVideo } from "../api/client.js";
+import {
+  API_BASE,
+  getVideoStatus,
+  resetVideoRoi,
+  setVideoRoi,
+  uploadVideo,
+} from "../api/client.js";
 import Toggle from "../components/Toggle.jsx";
 import StatCard from "../components/StatCard.jsx";
 import ChartPanel from "../components/ChartPanel.jsx";
@@ -32,9 +38,66 @@ function getAlertTone(level) {
   }
 }
 
+function clampPoint(point) {
+  return {
+    x: Math.max(0, Math.min(Number(point.x) || 0, 1)),
+    y: Math.max(0, Math.min(Number(point.y) || 0, 1)),
+  };
+}
+
+function boxToPolygon(box) {
+  const x = Math.max(0, Math.min(Number(box.x) || 0, 0.99));
+  const y = Math.max(0, Math.min(Number(box.y) || 0, 0.99));
+  const w = Math.max(0.02, Math.min(Number(box.w) || 1, 1 - x));
+  const h = Math.max(0.02, Math.min(Number(box.h) || 1, 1 - y));
+  return {
+    type: "polygon",
+    points: [
+      { x, y },
+      { x: x + w, y },
+      { x: x + w, y: y + h },
+      { x, y: y + h },
+    ],
+  };
+}
+
+function normalizeRoi(roi) {
+  if (!roi) return null;
+  if (roi.type === "polygon" && Array.isArray(roi.points)) {
+    const points = roi.points.map(clampPoint);
+    if (points.length >= 3) {
+      return { type: "polygon", points };
+    }
+  }
+  if ("x" in roi && "y" in roi && "w" in roi && "h" in roi) {
+    return boxToPolygon(roi);
+  }
+  return null;
+}
+
+function movePolygon(points, dx, dy) {
+  const minX = Math.min(...points.map((point) => point.x));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxY = Math.max(...points.map((point) => point.y));
+  const safeDx = Math.max(-minX, Math.min(dx, 1 - maxX));
+  const safeDy = Math.max(-minY, Math.min(dy, 1 - maxY));
+  return points.map((point) => ({
+    x: point.x + safeDx,
+    y: point.y + safeDy,
+  }));
+}
+
+function polygonPointsAttr(points) {
+  return points.map((point) => `${point.x * 100},${point.y * 100}`).join(" ");
+}
+
 // Video upload mode with MJPEG preview and analytics.
 export default function VideoMode() {
   const previewRef = useRef(null);
+  const panelRef = useRef(null);
+  const streamImageRef = useRef(null);
+  const roiDragRef = useRef(null);
 
   const [labels, setLabels] = useState(true);
   const [conf, setConf] = useState(true);
@@ -46,6 +109,10 @@ export default function VideoMode() {
   const [annotating, setAnnotating] = useState(false);
   const [targetFps, setTargetFps] = useState(30);
   const [streamUrl, setStreamUrl] = useState(null);
+  const [roi, setRoi] = useState(null);
+  const [roiSource, setRoiSource] = useState(null);
+  const [selectedRoiPoint, setSelectedRoiPoint] = useState(null);
+  const [, setRoiLayoutVersion] = useState(0);
   const [error, setError] = useState(null);
 
   const alertTone = getAlertTone(metrics.alert_level);
@@ -62,6 +129,10 @@ export default function VideoMode() {
         }
         if (Array.isArray(status.live_series)) {
           setSeries(status.live_series);
+        }
+        if (!roiDragRef.current) {
+          setRoi(normalizeRoi(status.roi || status.roi_box));
+          setRoiSource(status.roi_source || null);
         }
         if (status.status === "done" || status.status === "failed") {
           clearInterval(timer);
@@ -96,6 +167,15 @@ export default function VideoMode() {
     };
   }, []);
 
+  useEffect(() => {
+    function refreshRoiLayout() {
+      setRoiLayoutVersion((version) => version + 1);
+    }
+
+    window.addEventListener("resize", refreshRoiLayout);
+    return () => window.removeEventListener("resize", refreshRoiLayout);
+  }, []);
+
   // Upload a video and initialize the job status view.
   async function handleVideoUpload(e) {
     const file = e.target.files?.[0];
@@ -111,6 +191,9 @@ export default function VideoMode() {
     setJob(null);
     setMetrics(DEFAULT_METRICS);
     setSeries([]);
+    setRoi(null);
+    setRoiSource(null);
+    setSelectedRoiPoint(null);
     if (uploadedUrl) {
       URL.revokeObjectURL(uploadedUrl);
     }
@@ -150,6 +233,160 @@ export default function VideoMode() {
     setAnnotating(false);
     setStreamUrl(null);
   }
+
+  function getImageBox() {
+    const panel = panelRef.current;
+    const image = streamImageRef.current;
+    if (!panel || !image) return null;
+
+    const panelRect = panel.getBoundingClientRect();
+    const imageRect = image.getBoundingClientRect();
+    return {
+      left: imageRect.left - panelRect.left,
+      top: imageRect.top - panelRect.top,
+      width: imageRect.width,
+      height: imageRect.height,
+    };
+  }
+
+  function roiOverlayStyle() {
+    if (!roi) return null;
+    const box = getImageBox();
+    if (!box) return null;
+    return {
+      left: box.left,
+      top: box.top,
+      width: box.width,
+      height: box.height,
+    };
+  }
+
+  function beginRoiEdit(e, mode, pointIndex = null) {
+    if (!roi || !jobId) return;
+    const imageBox = getImageBox();
+    if (!imageBox) return;
+
+    e.preventDefault();
+    setSelectedRoiPoint(pointIndex);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    roiDragRef.current = {
+      mode,
+      pointIndex,
+      startX: e.clientX,
+      startY: e.clientY,
+      startPoints: roi.points.map((point) => ({ ...point })),
+      latestRoi: roi,
+      imageBox,
+    };
+  }
+
+  function updateRoiEdit(e) {
+    const drag = roiDragRef.current;
+    if (!drag) return;
+
+    const dx = (e.clientX - drag.startX) / Math.max(drag.imageBox.width, 1);
+    const dy = (e.clientY - drag.startY) / Math.max(drag.imageBox.height, 1);
+    const points =
+      drag.mode === "move"
+        ? movePolygon(drag.startPoints, dx, dy)
+        : drag.startPoints.map((point, index) =>
+            index === drag.pointIndex
+              ? clampPoint({ x: point.x + dx, y: point.y + dy })
+              : point
+          );
+    const next = { type: "polygon", points };
+
+    drag.latestRoi = next;
+    setRoi(next);
+    setRoiSource("manual");
+  }
+
+  async function finishRoiEdit(e) {
+    const drag = roiDragRef.current;
+    if (!drag || !jobId) return;
+
+    const nextRoi = drag.latestRoi || roi;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // Pointer capture can already be released by the browser.
+    }
+    roiDragRef.current = null;
+    if (!nextRoi) return;
+    try {
+      const data = await setVideoRoi(jobId, nextRoi);
+      setRoi(normalizeRoi(data.roi || data.roi_box));
+      setRoiSource(data.roi_source);
+    } catch (err) {
+      setError(err.message || "ROI update failed.");
+    }
+  }
+
+  async function persistRoi(nextRoi) {
+    if (!jobId) return;
+    setRoi(nextRoi);
+    setRoiSource("manual");
+    try {
+      const data = await setVideoRoi(jobId, nextRoi);
+      setRoi(normalizeRoi(data.roi || data.roi_box));
+      setRoiSource(data.roi_source);
+    } catch (err) {
+      setError(err.message || "ROI update failed.");
+    }
+  }
+
+  function handleAddRoiPoint() {
+    if (!roi || roi.points.length < 3) return;
+
+    let insertAfter = 0;
+    let longest = -1;
+    roi.points.forEach((point, index) => {
+      const next = roi.points[(index + 1) % roi.points.length];
+      const dx = next.x - point.x;
+      const dy = next.y - point.y;
+      const length = dx * dx + dy * dy;
+      if (length > longest) {
+        longest = length;
+        insertAfter = index;
+      }
+    });
+
+    const a = roi.points[insertAfter];
+    const b = roi.points[(insertAfter + 1) % roi.points.length];
+    const midpoint = clampPoint({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+    const points = [
+      ...roi.points.slice(0, insertAfter + 1),
+      midpoint,
+      ...roi.points.slice(insertAfter + 1),
+    ];
+    setSelectedRoiPoint(insertAfter + 1);
+    persistRoi({ type: "polygon", points });
+  }
+
+  function handleRemoveRoiPoint() {
+    if (!roi || roi.points.length <= 3) return;
+    const removeIndex =
+      selectedRoiPoint !== null && selectedRoiPoint < roi.points.length
+        ? selectedRoiPoint
+        : roi.points.length - 1;
+    const points = roi.points.filter((_, index) => index !== removeIndex);
+    setSelectedRoiPoint(Math.min(removeIndex, points.length - 1));
+    persistRoi({ type: "polygon", points });
+  }
+
+  async function handleResetRoi() {
+    if (!jobId) return;
+    try {
+      const data = await resetVideoRoi(jobId);
+      setRoi(normalizeRoi(data.roi || data.roi_box));
+      setRoiSource(data.roi_source || null);
+      setSelectedRoiPoint(null);
+    } catch (err) {
+      setError(err.message || "ROI reset failed.");
+    }
+  }
+
+  const currentRoiStyle = roiOverlayStyle();
 
   return (
     <section className="grid gap-6">
@@ -207,14 +444,85 @@ export default function VideoMode() {
               </div>
             </div>
 
-            <div className={PREVIEW_PANEL_CLASS}>
+            <div ref={panelRef} className={`${PREVIEW_PANEL_CLASS} relative`}>
               {error && <p className="text-rose-500">{error}</p>}
               {streamUrl ? (
-                <img
-                  src={streamUrl}
-                  alt="Annotated"
-                  className="max-h-full rounded-2xl shadow-lg"
-                />
+                <>
+                  <img
+                    ref={streamImageRef}
+                    src={streamUrl}
+                    alt="Annotated"
+                    className="max-h-full rounded-2xl shadow-lg"
+                    onLoad={() => setRoiLayoutVersion((version) => version + 1)}
+                  />
+                  {currentRoiStyle && roi && (
+                    <svg
+                      className="absolute overflow-visible"
+                      style={currentRoiStyle}
+                      viewBox="0 0 100 100"
+                      preserveAspectRatio="none"
+                    >
+                      <polygon
+                        points={polygonPointsAttr(roi.points)}
+                        className="cursor-move fill-emerald-400/20 stroke-emerald-400"
+                        strokeWidth="0.45"
+                        vectorEffect="non-scaling-stroke"
+                        onPointerDown={(e) => beginRoiEdit(e, "move")}
+                        onPointerMove={updateRoiEdit}
+                        onPointerUp={finishRoiEdit}
+                      />
+                      {roi.points.map((point, index) => (
+                        <circle
+                          key={`${point.x}-${point.y}-${index}`}
+                          cx={point.x * 100}
+                          cy={point.y * 100}
+                          r="1.4"
+                          className={`cursor-grab stroke-white ${
+                            selectedRoiPoint === index
+                              ? "fill-amber-400"
+                              : "fill-emerald-500"
+                          }`}
+                          strokeWidth="0.35"
+                          vectorEffect="non-scaling-stroke"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            beginRoiEdit(e, "point", index);
+                          }}
+                          onPointerMove={updateRoiEdit}
+                          onPointerUp={finishRoiEdit}
+                        />
+                      ))}
+                    </svg>
+                  )}
+                  {roi && (
+                    <div className="absolute right-4 top-4 flex gap-2">
+                      <button
+                        className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-soft disabled:opacity-50"
+                        onClick={handleAddRoiPoint}
+                        type="button"
+                      >
+                        Add Point
+                      </button>
+                      <button
+                        className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-soft disabled:opacity-50"
+                        onClick={handleRemoveRoiPoint}
+                        disabled={roi.points.length <= 3}
+                        type="button"
+                      >
+                        Remove Point
+                      </button>
+                      {roiSource === "manual" && (
+                        <button
+                          className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-soft"
+                          onClick={handleResetRoi}
+                          type="button"
+                        >
+                          Reset ROI
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
               ) : uploadedUrl ? (
                 <video
                   ref={previewRef}

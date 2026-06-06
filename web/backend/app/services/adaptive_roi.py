@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import logging
-import threading
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,8 +19,6 @@ class ROIConfig:
     otsu_bias: float = 1.05
     morph_kernel_size: int = 15
     farneback_scale: float = 0.5
-    update_interval_sec: float = 600.0
-    rolling_window_size: int = 100
     max_zones: int = 2
 
 
@@ -44,6 +40,204 @@ class ROIResult:
         return time.time() - self.timestamp
 
 
+def normalize_roi_box(box: dict[str, Any]) -> dict[str, float]:
+    x = float(box.get("x", 0.0))
+    y = float(box.get("y", 0.0))
+    w = float(box.get("w", 1.0))
+    h = float(box.get("h", 1.0))
+
+    x = max(0.0, min(x, 0.99))
+    y = max(0.0, min(y, 0.99))
+    w = max(0.01, min(w, 1.0 - x))
+    h = max(0.01, min(h, 1.0 - y))
+
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
+def _normalize_roi_point(point: dict[str, Any]) -> dict[str, float]:
+    x = max(0.0, min(float(point.get("x", 0.0)), 1.0))
+    y = max(0.0, min(float(point.get("y", 0.0)), 1.0))
+    return {"x": x, "y": y}
+
+
+def normalize_roi_polygon(points: list[dict[str, Any]]) -> list[dict[str, float]]:
+    if not isinstance(points, list):
+        raise ValueError("ROI polygon points must be a list")
+
+    normalized: list[dict[str, float]] = []
+    seen: set[tuple[float, float]] = set()
+    for raw_point in points:
+        if not isinstance(raw_point, dict):
+            raise ValueError("ROI polygon point must be an object")
+        point = _normalize_roi_point(raw_point)
+        key = (round(point["x"], 6), round(point["y"], 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(point)
+
+    if len(normalized) < 3:
+        raise ValueError("ROI polygon needs at least 3 unique points")
+
+    return normalized
+
+
+def normalize_roi_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("ROI payload must be an object")
+
+    roi_type = payload.get("type")
+    if roi_type == "polygon":
+        return {
+            "type": "polygon",
+            "points": normalize_roi_polygon(payload.get("points", [])),
+        }
+
+    if roi_type in (None, "box"):
+        box = normalize_roi_box(payload)
+        return {"type": "box", **box}
+
+    raise ValueError(f"Unsupported ROI type: {roi_type!r}")
+
+
+def roi_box_from_result(roi: ROIResult) -> dict[str, float]:
+    coords = cv2.findNonZero(roi.combined_mask)
+    h, w = roi.frame_shape
+    if coords is None:
+        return {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+
+    x, y, box_w, box_h = cv2.boundingRect(coords)
+    return normalize_roi_box(
+        {
+            "x": x / max(w, 1),
+            "y": y / max(h, 1),
+            "w": box_w / max(w, 1),
+            "h": box_h / max(h, 1),
+        }
+    )
+
+
+def _polygon_payload_from_box(box: dict[str, float]) -> dict[str, Any]:
+    x = box["x"]
+    y = box["y"]
+    x2 = x + box["w"]
+    y2 = y + box["h"]
+    return {
+        "type": "polygon",
+        "points": [
+            {"x": x, "y": y},
+            {"x": x2, "y": y},
+            {"x": x2, "y": y2},
+            {"x": x, "y": y2},
+        ],
+    }
+
+
+def _simplify_hull_points(hull: np.ndarray, max_points: int = 12) -> np.ndarray:
+    points = hull.reshape(-1, 2).astype(np.int32)
+    if len(points) <= max_points:
+        return points
+
+    contour = points.reshape(-1, 1, 2)
+    perimeter = cv2.arcLength(contour, True)
+    for ratio in (0.005, 0.01, 0.02, 0.035, 0.05):
+        approx = cv2.approxPolyDP(contour, ratio * perimeter, True).reshape(-1, 2)
+        if 3 <= len(approx) <= max_points:
+            return approx.astype(np.int32)
+
+    return points[:max_points]
+
+
+def roi_polygon_from_result(roi: ROIResult) -> dict[str, Any]:
+    coords = cv2.findNonZero(roi.combined_mask)
+    if coords is None:
+        return _polygon_payload_from_box({"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0})
+
+    hull = cv2.convexHull(coords)
+    simplified = _simplify_hull_points(hull)
+    if len(simplified) < 3:
+        return _polygon_payload_from_box(roi_box_from_result(roi))
+
+    h, w = roi.frame_shape
+    x_denom = max(w - 1, 1)
+    y_denom = max(h - 1, 1)
+    points = [
+        {
+            "x": max(0.0, min(float(x) / x_denom, 1.0)),
+            "y": max(0.0, min(float(y) / y_denom, 1.0)),
+        }
+        for x, y in simplified
+    ]
+    return {"type": "polygon", "points": normalize_roi_polygon(points)}
+
+
+def roi_from_box(
+    frame_shape: tuple[int, int],
+    box: dict[str, Any],
+) -> ROIResult:
+    h, w = frame_shape
+    roi_box = normalize_roi_box(box)
+    x1 = int(round(roi_box["x"] * w))
+    y1 = int(round(roi_box["y"] * h))
+    x2 = int(round((roi_box["x"] + roi_box["w"]) * w))
+    y2 = int(round((roi_box["y"] + roi_box["h"]) * h))
+
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(x1 + 1, min(x2, w))
+    y2 = max(y1 + 1, min(y2, h))
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[y1:y2, x1:x2] = 255
+    hull = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
+    return ROIResult(
+        masks=[mask],
+        hulls=[hull],
+        combined_mask=mask,
+        frame_shape=(h, w),
+    )
+
+
+def roi_from_polygon(
+    frame_shape: tuple[int, int],
+    points: list[dict[str, Any]],
+) -> ROIResult:
+    h, w = frame_shape
+    polygon = normalize_roi_polygon(points)
+    pixel_points = np.array(
+        [
+            [
+                int(round(point["x"] * max(w - 1, 1))),
+                int(round(point["y"] * max(h - 1, 1))),
+            ]
+            for point in polygon
+        ],
+        dtype=np.int32,
+    )
+    pixel_points[:, 0] = np.clip(pixel_points[:, 0], 0, max(w - 1, 0))
+    pixel_points[:, 1] = np.clip(pixel_points[:, 1], 0, max(h - 1, 0))
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(mask, [pixel_points], 255)
+    hull = cv2.convexHull(pixel_points)
+    return ROIResult(
+        masks=[mask],
+        hulls=[hull],
+        combined_mask=mask,
+        frame_shape=(h, w),
+    )
+
+
+def roi_from_payload(
+    frame_shape: tuple[int, int],
+    payload: dict[str, Any],
+) -> ROIResult:
+    roi_payload = normalize_roi_payload(payload)
+    if roi_payload["type"] == "polygon":
+        return roi_from_polygon(frame_shape, roi_payload["points"])
+    return roi_from_box(frame_shape, roi_payload)
+
+
 # Build ROI config from global settings.
 def build_roi_config_from_settings(settings: Any) -> ROIConfig:
     return ROIConfig(
@@ -52,8 +246,6 @@ def build_roi_config_from_settings(settings: Any) -> ROIConfig:
         otsu_bias=settings.roi_otsu_bias,
         morph_kernel_size=settings.roi_morph_kernel_size,
         farneback_scale=settings.roi_farneback_scale,
-        update_interval_sec=settings.roi_update_interval_sec,
-        rolling_window_size=settings.roi_rolling_window_size,
         max_zones=settings.roi_max_zones,
     )
 
@@ -346,70 +538,26 @@ def draw_roi_overlay(
 
 # Background worker that keeps ROI up to date.
 class ROIUpdater:
-    # Maintain a rolling window and periodically recompute ROI.
+    # Static ROI holder. Recalibration is intentionally disabled after startup.
     def __init__(self, config: ROIConfig, initial_roi: ROIResult) -> None:
         self._config = config
-        self._roi_lock = threading.Lock()
         self._current_roi: ROIResult = initial_roi
-
-        self._frame_buffer: deque[np.ndarray] = deque(
-            maxlen=config.rolling_window_size
-        )
-        self._buffer_lock = threading.Lock()
-
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-
         self.update_count = 0
-        self.last_update_time: float | None = None
+        self.last_update_time: float | None = initial_roi.timestamp
 
     @property
     # Thread-safe accessor for the current ROI.
     def current(self) -> ROIResult:
-        with self._roi_lock:
-            return self._current_roi
+        return self._current_roi
 
     # Add a frame to the rolling buffer.
     def push_frame(self, frame: np.ndarray) -> None:
-        with self._buffer_lock:
-            self._frame_buffer.append(frame.copy())
+        return None
 
     # Start background ROI update thread.
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._update_loop,
-            name="roi-updater",
-            daemon=True,
-        )
-        self._thread.start()
+        return None
 
     # Stop background ROI update thread.
     def stop(self, timeout: float = 5.0) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=timeout)
-
-    # Periodically recompute ROI using buffered frames.
-    def _update_loop(self) -> None:
-        while not self._stop_event.is_set():
-            stopped = self._stop_event.wait(timeout=self._config.update_interval_sec)
-            if stopped:
-                break
-
-            with self._buffer_lock:
-                frames_snapshot = list(self._frame_buffer)
-
-            if len(frames_snapshot) < 10:
-                continue
-
-            try:
-                new_roi = compute_adaptive_roi(frames_snapshot, self._config)
-                with self._roi_lock:
-                    self._current_roi = new_roi
-                self.update_count += 1
-                self.last_update_time = time.time()
-            except Exception:
-                logger.exception("ROI update failed; keeping previous ROI.")
+        return None

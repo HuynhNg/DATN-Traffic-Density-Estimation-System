@@ -33,8 +33,6 @@ class Settings(BaseSettings):
     roi_otsu_bias: float = 1.05
     roi_morph_kernel_size: int = 15
     roi_farneback_scale: float = 0.5
-    roi_update_interval_sec: float = 600.0
-    roi_rolling_window_size: int = 100
     roi_max_zones: int = 2
     roi_draw: bool = False
     roi_draw_alpha: float = 0.25

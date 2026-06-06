@@ -14,7 +14,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import settings
@@ -27,6 +27,10 @@ from app.services.adaptive_roi import (
     compute_adaptive_roi,
     draw_roi_overlay,
     filter_detections_by_roi_xyxy,
+    normalize_roi_payload,
+    roi_box_from_result,
+    roi_from_payload,
+    roi_polygon_from_result,
     remap_detections_to_original,
 )
 from app.services.analytics import AnalyticsTracker
@@ -168,10 +172,21 @@ def _start_video_processing(
     )
 
 
+def _validate_roi_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        roi_payload = normalize_roi_payload(payload)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid ROI payload")
+
+    if roi_payload["type"] == "box" and (roi_payload["w"] <= 0 or roi_payload["h"] <= 0):
+        raise HTTPException(status_code=400, detail="ROI width and height must be positive")
+    return roi_payload
+
+
 def _update_stream_roi_state(
     state: StreamROIState,
     frame: np.ndarray,
-    job_id: str,
+    job: VideoJob,
 ) -> ROIUpdater | None:
     if state.config is None or state.failed:
         return None
@@ -185,10 +200,13 @@ def _update_stream_roi_state(
             roi = state.future.result()
             state.updater = ROIUpdater(state.config, roi)
             state.updater.start()
-            logger.info("Adaptive ROI enabled for stream job %s", job_id)
+            job.roi = roi_polygon_from_result(roi)
+            job.roi_box = roi_box_from_result(roi)
+            job.roi_source = "auto"
+            logger.info("Adaptive ROI enabled for stream job %s", job.job_id)
         except Exception:
             state.failed = True
-            logger.exception("Adaptive ROI calibration failed for stream job %s", job_id)
+            logger.exception("Adaptive ROI calibration failed for stream job %s", job.job_id)
         finally:
             state.future = None
         return None
@@ -203,13 +221,13 @@ def _update_stream_roi_state(
     if state.executor is None:
         state.failed = True
         state.calibration_frames = None
-        logger.error("Adaptive ROI executor is not available for stream job %s", job_id)
+        logger.error("Adaptive ROI executor is not available for stream job %s", job.job_id)
         return None
 
     frames = state.calibration_frames
     state.calibration_frames = None
     state.future = state.executor.submit(compute_adaptive_roi, frames, state.config)
-    logger.info("Adaptive ROI calibration started for stream job %s", job_id)
+    logger.info("Adaptive ROI calibration started for stream job %s", job.job_id)
 
     return None
 
@@ -231,24 +249,36 @@ def _init_bytetracker(job_id: str, source_fps: float) -> ByteTrackWrapper | None
 def _detect_stream_frame(
     frame: np.ndarray,
     engine: InferenceEngine,
-    roi_updater: ROIUpdater | None,
+    roi: ROIResult | None,
 ) -> tuple[list[dict[str, Any]], np.ndarray]:
-    if roi_updater is None:
+    if roi is None:
         roi_mask = np.ones(frame.shape[:2], dtype=np.uint8) * 255
         detections, _ = engine.detect(frame)
         return detections, roi_mask
 
-    roi_updater.push_frame(frame)
-    current_roi = roi_updater.current
-    processed, offset = apply_roi_to_frame(frame, current_roi, mode=settings.roi_mode)
+    processed, offset = apply_roi_to_frame(frame, roi, mode=settings.roi_mode)
     detections, _ = engine.detect(processed)
     detections = remap_detections_to_original(detections, offset)
     detections = filter_detections_by_roi_xyxy(
         detections,
-        current_roi,
+        roi,
         anchor=settings.roi_anchor,
     )
-    return detections, current_roi.combined_mask
+    return detections, roi.combined_mask
+
+
+def _resolve_stream_roi(
+    job: VideoJob,
+    frame_shape: tuple[int, int],
+    roi_updater: ROIUpdater | None,
+) -> ROIResult | None:
+    if job.manual_roi is not None:
+        return roi_from_payload(frame_shape, job.manual_roi)
+    if job.manual_roi_box is not None:
+        return roi_from_payload(frame_shape, job.manual_roi_box)
+    if roi_updater is not None:
+        return roi_updater.current
+    return None
 
 
 def _track_stream_detections(
@@ -376,6 +406,9 @@ async def get_video_status(job_id: str) -> dict[str, Any]:
         "total_frames": job.total_frames,
         "live_metrics": job.live_metrics,
         "live_series": job.live_series,
+        "roi": job.manual_roi or job.roi,
+        "roi_box": job.manual_roi_box or job.roi_box,
+        "roi_source": "manual" if job.manual_roi or job.manual_roi_box else job.roi_source,
     }
 
 
@@ -396,6 +429,44 @@ async def start_video_processing(
         "status": job.status,
         "progress": job.progress,
         "result_url": f"/api/video/{job_id}/result" if job.result_path else None,
+    }
+
+
+@router.post("/video/{job_id}/roi")
+# Set a manual normalized ROI for a video job.
+async def set_video_roi(
+    job_id: str,
+    payload: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    roi_payload = _validate_roi_payload(payload)
+    job.manual_roi = roi_payload
+    job.manual_roi_box = roi_payload if roi_payload["type"] == "box" else None
+    return {
+        "job_id": job.job_id,
+        "roi": roi_payload,
+        "roi_box": job.manual_roi_box,
+        "roi_source": "manual",
+    }
+
+
+@router.delete("/video/{job_id}/roi")
+# Reset manual ROI and let the auto ROI apply again when available.
+async def reset_video_roi(job_id: str) -> dict[str, Any]:
+    job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job.manual_roi_box = None
+    job.manual_roi = None
+    return {
+        "job_id": job.job_id,
+        "roi": job.roi,
+        "roi_box": job.roi_box,
+        "roi_source": job.roi_source,
     }
 
 
@@ -450,9 +521,14 @@ async def stream_video(
                 roi_updater = _update_stream_roi_state(
                     roi_state,
                     resized,
-                    job.job_id,
+                    job,
                 )
-                detections, roi_mask = _detect_stream_frame(resized, engine, roi_updater)
+                current_roi = _resolve_stream_roi(
+                    job,
+                    resized.shape[:2],
+                    roi_updater,
+                )
+                detections, roi_mask = _detect_stream_frame(resized, engine, current_roi)
                 tracked = _track_stream_detections(
                     detections,
                     resized,
@@ -464,10 +540,10 @@ async def stream_video(
                     last_tracked = tracked
 
                 annotated = render_boxes(resized, tracked, labels, conf)
-                if roi_updater is not None and settings.roi_draw:
+                if current_roi is not None and settings.roi_draw:
                     annotated = draw_roi_overlay(
                         annotated,
-                        roi_updater.current,
+                        current_roi,
                         alpha=settings.roi_draw_alpha,
                     )
 

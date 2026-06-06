@@ -65,3 +65,23 @@ export async function startVideoProcessing(jobId, { labels, conf }) {
   await assertOk(res, "Video processing failed");
   return res.json();
 }
+
+// Save a manual normalized ROI polygon for a video job.
+export async function setVideoRoi(jobId, roi) {
+  const res = await fetch(`${API_BASE}/api/video/${jobId}/roi`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(roi),
+  });
+  await assertOk(res, "ROI update failed");
+  return res.json();
+}
+
+// Clear manual ROI for a video job.
+export async function resetVideoRoi(jobId) {
+  const res = await fetch(`${API_BASE}/api/video/${jobId}/roi`, {
+    method: "DELETE",
+  });
+  await assertOk(res, "ROI reset failed");
+  return res.json();
+}

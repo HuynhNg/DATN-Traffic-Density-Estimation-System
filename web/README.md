@@ -117,6 +117,7 @@ User clicks Run AI
   -> target_fps controls frame skipping; default is 30 to keep ByteTrack stable
   -> initial frames are detected full-frame while ROI calibration frames are collected
   -> ROI filtering and overlay are applied only after enough calibration frames
+  -> users can edit the polygon ROI overlay; manual ROI overrides auto ROI
   -> each streamed frame is optionally tracked, rendered, and JPEG encoded
   -> backend updates live_metrics and live_series on the video job
   -> frontend displays MJPEG stream, live cards, alert badge, and chart
@@ -383,8 +384,6 @@ APP_ROI_ENABLED=true
 APP_ROI_MODE=mask
 APP_ROI_ANCHOR=bottom_center
 APP_ROI_CALIB_FRAMES=100
-APP_ROI_ROLLING_WINDOW_SIZE=100
-APP_ROI_UPDATE_INTERVAL_SEC=600
 APP_ROI_DRAW=true
 APP_ROI_DRAW_ALPHA=0.25
 ```
@@ -392,10 +391,16 @@ APP_ROI_DRAW_ALPHA=0.25
 For realtime stream, ROI calibration is non-blocking. The backend still detects
 and streams the initial frames normally without ROI; once `APP_ROI_CALIB_FRAMES`
 frames have been collected, ROI filtering and drawing are applied to subsequent
-frames.
+frames. Auto ROI is computed once and is not periodically recalibrated.
 
 Set `APP_ROI_ENABLED=false` and `APP_ROI_DRAW=false` if you want to run full
 frame detection without ROI calibration or overlay drawing.
+
+When auto ROI is ready in Video Mode, the frontend shows an editable polygon ROI
+over the MJPEG stream. Drag the polygon to move it, drag individual vertices to
+reshape it, or add/remove vertices when the road area needs more than four
+points. The frontend saves normalized ROI coordinates to the backend, and that
+manual ROI is used for subsequent detection frames.
 
 ## API Reference
 
@@ -503,7 +508,17 @@ Response:
   "analytics": {
     "avg_objects": 3.2,
     "series": [{ "frame": 1, "count": 2 }]
-  }
+  },
+  "roi": {
+    "type": "polygon",
+    "points": [
+      { "x": 0.18, "y": 0.42 },
+      { "x": 0.62, "y": 0.4 },
+      { "x": 0.82, "y": 0.96 },
+      { "x": 0.08, "y": 0.96 }
+    ]
+  },
+  "roi_source": "auto"
 }
 ```
 
@@ -546,6 +561,55 @@ Response content type:
 ```text
 multipart/x-mixed-replace; boundary=frame
 ```
+
+### Set Manual ROI
+
+```http
+POST /api/video/{job_id}/roi
+```
+
+Body uses normalized image coordinates. Polygon ROI is the preferred format:
+
+```json
+{
+  "type": "polygon",
+  "points": [
+    { "x": 0.18, "y": 0.42 },
+    { "x": 0.62, "y": 0.4 },
+    { "x": 0.82, "y": 0.96 },
+    { "x": 0.08, "y": 0.96 }
+  ]
+}
+```
+
+Legacy rectangular ROI payloads are still accepted as `{ "x": 0.1, "y": 0.2,
+"w": 0.7, "h": 0.5 }`.
+
+Response:
+
+```json
+{
+  "job_id": "uuid",
+  "roi": {
+    "type": "polygon",
+    "points": [
+      { "x": 0.18, "y": 0.42 },
+      { "x": 0.62, "y": 0.4 },
+      { "x": 0.82, "y": 0.96 },
+      { "x": 0.08, "y": 0.96 }
+    ]
+  },
+  "roi_source": "manual"
+}
+```
+
+### Reset Manual ROI
+
+```http
+DELETE /api/video/{job_id}/roi
+```
+
+Clears the manual ROI and returns to the auto ROI when one is available.
 
 ## Traffic Metrics
 

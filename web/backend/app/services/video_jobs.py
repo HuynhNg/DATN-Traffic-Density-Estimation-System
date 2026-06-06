@@ -39,6 +39,11 @@ class VideoJob:
     input_path: str | None = None
     live_metrics: dict | None = None
     live_series: list[dict[str, Any]] | None = None
+    roi: dict[str, Any] | None = None
+    roi_box: dict[str, float] | None = None
+    roi_source: str | None = None
+    manual_roi: dict[str, Any] | None = None
+    manual_roi_box: dict[str, float] | None = None
 
 
 # Simple in-memory job registry.
