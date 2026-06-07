@@ -40,6 +40,8 @@ class VideoJob:
     live_metrics: dict | None = None
     live_series: list[dict[str, Any]] | None = None
     live_history: list[dict[str, Any]] | None = None
+    live_track_states: dict[int, dict[str, Any]] | None = None
+    live_flow_events: list[dict[str, Any]] | None = None
     roi: dict[str, Any] | None = None
     roi_box: dict[str, float] | None = None
     roi_source: str | None = None

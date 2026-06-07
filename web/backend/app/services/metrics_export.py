@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import io
+import time
 import zipfile
-from collections import Counter, deque
+from collections import defaultdict
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -33,10 +34,19 @@ def _sheet_xml(rows: list[list[Any]]) -> str:
         cells = "".join(_cell_xml(row_idx, col_idx, value) for col_idx, value in enumerate(row, start=1))
         sheet_rows.append(f'<row r="{row_idx}">{cells}</row>')
 
+    column_widths = [18, 14, 32, 32, 12, 12, 12, 12]
+    cols = "".join(
+        f'<col min="{idx}" max="{idx}" width="{width}" customWidth="1"/>'
+        for idx, width in enumerate(column_widths, start=1)
+    )
+
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        "<cols>"
+        + cols
+        + "</cols>"
         '<sheetData>'
         + "".join(sheet_rows)
         + "</sheetData></worksheet>"
@@ -49,8 +59,8 @@ def _workbook_xml() -> str:
         '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
         "<sheets>"
-        '<sheet name="Summary" sheetId="1" r:id="rId1"/>'
-        '<sheet name="History" sheetId="2" r:id="rId2"/>'
+        '<sheet name="Theo phút" sheetId="1" r:id="rId1"/>'
+        '<sheet name="Theo giờ" sheetId="2" r:id="rId2"/>'
         "</sheets></workbook>"
     )
 
@@ -103,89 +113,115 @@ def _track_ids_from_row(row: dict[str, Any]) -> set[int]:
     return {int(track_id) for track_id in track_ids if track_id is not None}
 
 
-def _unique_vehicle_counts(rows: list[dict[str, Any]], window_sec: int) -> list[int]:
-    counts: list[int] = []
-    active_counts: Counter[int] = Counter()
-    active_rows: deque[tuple[float, set[int]]] = deque()
+def _track_classes_from_row(row: dict[str, Any]) -> dict[int, str]:
+    track_classes = row.get("track_classes")
+    if not isinstance(track_classes, list):
+        return {}
 
-    for row in rows:
-        current_ts = float(row.get("timestamp", 0.0))
-        cutoff = current_ts - window_sec
-        row_track_ids = _track_ids_from_row(row)
+    result: dict[int, str] = {}
+    for item in track_classes:
+        if not isinstance(item, dict) or item.get("track_id") is None:
+            continue
+        result[int(item["track_id"])] = str(item.get("class_name", "")).lower()
+    return result
 
-        active_rows.append((current_ts, row_track_ids))
-        for track_id in row_track_ids:
-            active_counts[track_id] += 1
 
-        while active_rows and active_rows[0][0] < cutoff:
-            _old_ts, old_track_ids = active_rows.popleft()
-            for track_id in old_track_ids:
-                active_counts[track_id] -= 1
-                if active_counts[track_id] <= 0:
-                    del active_counts[track_id]
+def _bucket_label(bucket_start: int, bucket_seconds: int) -> str:
+    fmt = "%Y-%m-%d %H:00" if bucket_seconds == 3600 else "%Y-%m-%d %H:%M"
+    return time.strftime(fmt, time.localtime(bucket_start))
 
-        if active_counts:
-            counts.append(len(active_counts))
-        else:
-            counts.append(int(row.get("objects_in_frame", 0)))
-    return counts
+
+def _new_bucket() -> dict[str, Any]:
+    return {
+        "track_ids": set(),
+        "track_classes": {},
+        "right_to_left": 0,
+        "left_to_right": 0,
+    }
+
+
+def _bucket_rows(
+    history: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    bucket_seconds: int,
+) -> list[list[Any]]:
+    buckets: defaultdict[int, dict[str, Any]] = defaultdict(_new_bucket)
+
+    for row in history:
+        row_ts = float(row.get("timestamp", 0.0))
+        bucket_start = int(row_ts // bucket_seconds) * bucket_seconds
+        bucket = buckets[bucket_start]
+        track_ids = _track_ids_from_row(row)
+        bucket["track_ids"].update(track_ids)
+        bucket["track_classes"].update(_track_classes_from_row(row))
+
+    for event in events:
+        event_ts = float(event.get("timestamp", 0.0))
+        bucket_start = int(event_ts // bucket_seconds) * bucket_seconds
+        bucket = buckets[bucket_start]
+        event_type = event.get("type")
+        if event_type == "right_to_left":
+            bucket["right_to_left"] += 1
+        elif event_type == "left_to_right":
+            bucket["left_to_right"] += 1
+        if event.get("track_id") is not None:
+            track_id = int(event["track_id"])
+            bucket["track_ids"].add(track_id)
+            if event.get("class_name"):
+                bucket["track_classes"][track_id] = str(event["class_name"]).lower()
+
+    rows: list[list[Any]] = [
+        [
+            "Thời gian",
+            "Tổng số xe",
+            "Xe đi vào (phải sang trái)",
+            "Xe đi ra (trái sang phải)",
+            "Xe máy",
+            "Ô tô",
+            "Xe buýt",
+            "Xe tải",
+        ]
+    ]
+
+    for bucket_start in sorted(buckets):
+        bucket = buckets[bucket_start]
+        track_ids: set[int] = bucket["track_ids"]
+        track_classes: dict[int, str] = bucket["track_classes"]
+        class_counts = {"motor": 0, "car": 0, "bus": 0, "truck": 0}
+        for track_id in track_ids:
+            class_name = track_classes.get(track_id, "")
+            if class_name in ("motor", "motorcycle"):
+                class_counts["motor"] += 1
+            elif class_name in class_counts:
+                class_counts[class_name] += 1
+
+        rows.append(
+            [
+                _bucket_label(bucket_start, bucket_seconds),
+                len(track_ids),
+                bucket["right_to_left"],
+                bucket["left_to_right"],
+                class_counts["motor"],
+                class_counts["car"],
+                class_counts["bus"],
+                class_counts["truck"],
+            ]
+        )
+
+    return rows
 
 
 def build_metrics_workbook(
     job_id: str,
     history: list[dict[str, Any]],
     selected_window: str,
+    flow_events: list[dict[str, Any]] | None = None,
 ) -> bytes:
     sorted_history = sorted(history, key=lambda row: float(row.get("timestamp", 0.0)))
-    latest = sorted_history[-1] if sorted_history else {}
-    selected_total = latest.get("total_vehicles", 0)
-
-    summary_rows = [
-        ["Metric", "Value"],
-        ["Job ID", job_id],
-        ["Selected Total Window", selected_window],
-        ["Rows", len(sorted_history)],
-        ["Latest Time", latest.get("time", "")],
-        ["Latest Active Objects", latest.get("objects_in_frame", 0)],
-        ["Latest Total Vehicles", selected_total],
-        ["Latest Occupancy %", latest.get("occupancy_pct", 0)],
-        ["Latest PCE Count", latest.get("pce_count", 0)],
-        ["Latest Alert", latest.get("alert_label", "")],
-    ]
-
-    history_rows: list[list[Any]] = [
-        [
-            "timestamp",
-            "time",
-            "objects_in_frame",
-            "total_vehicles_1min",
-            "total_vehicles_1hour",
-            "track_ids",
-            "occupancy_pct",
-            "pce_count",
-            "alert_level",
-            "alert_label",
-            "fps",
-        ]
-    ]
-    minute_totals = _unique_vehicle_counts(sorted_history, 60)
-    hour_totals = _unique_vehicle_counts(sorted_history, 3600)
-    for idx, row in enumerate(sorted_history):
-        history_rows.append(
-            [
-                row.get("timestamp", 0),
-                row.get("time", ""),
-                row.get("objects_in_frame", 0),
-                minute_totals[idx],
-                hour_totals[idx],
-                ",".join(str(track_id) for track_id in row.get("track_ids", [])),
-                row.get("occupancy_pct", 0),
-                row.get("pce_count", 0),
-                row.get("alert_level", 0),
-                row.get("alert_label", ""),
-                row.get("fps", 0),
-            ]
-        )
+    sorted_events = sorted(flow_events or [], key=lambda event: float(event.get("timestamp", 0.0)))
+    _ = job_id, selected_window
+    minute_rows = _bucket_rows(sorted_history, sorted_events, 60)
+    hour_rows = _bucket_rows(sorted_history, sorted_events, 3600)
 
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -193,7 +229,7 @@ def build_metrics_workbook(
         archive.writestr("_rels/.rels", _root_rels_xml())
         archive.writestr("xl/workbook.xml", _workbook_xml())
         archive.writestr("xl/_rels/workbook.xml.rels", _workbook_rels_xml())
-        archive.writestr("xl/worksheets/sheet1.xml", _sheet_xml(summary_rows))
-        archive.writestr("xl/worksheets/sheet2.xml", _sheet_xml(history_rows))
+        archive.writestr("xl/worksheets/sheet1.xml", _sheet_xml(minute_rows))
+        archive.writestr("xl/worksheets/sheet2.xml", _sheet_xml(hour_rows))
 
     return output.getvalue()

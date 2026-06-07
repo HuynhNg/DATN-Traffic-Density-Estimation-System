@@ -8,16 +8,33 @@ import {
   CartesianGrid
 } from "recharts";
 
-// Line chart for object count over time.
-export default function ChartPanel({ data }) {
+function chartMeta(windowMode) {
+  if (windowMode === "hour") {
+    return {
+      subtitle: "Vehicle count grouped by hour",
+      badge: "Hourly",
+    };
+  }
+  return {
+    subtitle: "Vehicle count grouped by minute",
+    badge: "Per minute",
+  };
+}
+
+// Line chart for vehicle count over time buckets.
+export default function ChartPanel({ data, windowMode }) {
+  const meta = chartMeta(windowMode);
+
   return (
     <div className="glass rounded-2xl px-4 py-4 shadow-soft">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <h3 className="text-base font-semibold">Vehicle Volume Trend</h3>
-          <p className="text-xs text-slate-500">Realtime frame counts</p>
+          <p className="text-xs text-slate-500">{meta.subtitle}</p>
         </div>
-        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">Last 60 points</span>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">
+          {meta.badge}
+        </span>
       </div>
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">

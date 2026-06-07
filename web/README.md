@@ -121,7 +121,7 @@ User clicks Run AI
   -> users can edit the polygon ROI overlay; manual ROI overrides auto ROI
   -> each streamed frame is optionally tracked, rendered, and JPEG encoded
   -> backend updates live_metrics, live_series, and exportable metric history
-  -> frontend displays MJPEG stream, live cards, alert badge, and chart
+  -> frontend displays MJPEG stream, live cards, alert badge, and bucketed chart
 ```
 
 ## Supported Files
@@ -360,9 +360,17 @@ APP_USE_HALF=true
 APP_FRAME_SKIP=1
 APP_JPEG_QUALITY=85
 APP_STREAM_MAX_DIM=640
+APP_SAVE_DIR=storage
+APP_MAX_VIDEO_UPLOAD_MB=500
+APP_CLEAN_STORAGE_ON_STARTUP=true
 APP_AUTO_PROCESS_VIDEO=false
 APP_LOG_DETECTIONS=false
 ```
+
+`APP_MAX_VIDEO_UPLOAD_MB` limits `/api/video/upload`; files above this size are
+rejected with HTTP `413`. `APP_CLEAN_STORAGE_ON_STARTUP=true` clears old
+uploads and generated artifacts inside `APP_SAVE_DIR` every time the backend
+starts.
 
 `APP_AUTO_PROCESS_VIDEO=false` avoids running offline video processing at the
 same time as the realtime MJPEG stream. Enable it only when you explicitly need
@@ -384,12 +392,18 @@ APP_BYTETRACK_MIN_BOX_AREA=400
 APP_BYTETRACK_FRAME_SKIP=1
 APP_BYTETRACK_REPAIR_ENABLED=true
 APP_BYTETRACK_REPAIR_IOU=0.50
+APP_FLOW_EXIT_TIMEOUT_SEC=2.0
+APP_FLOW_DIRECTION_MIN_DX_RATIO=0.03
 ```
 
 For BoxMOT ByteTrack, `APP_BYTETRACK_IOU_HIGH` maps to `match_thresh`. Higher
 values are more tolerant during association. The repair options keep a previous
 `track_id` when the current detection still overlaps strongly with the previous
 tracked bbox, which reduces one-frame drops and track-id churn on small motors.
+`APP_FLOW_EXIT_TIMEOUT_SEC` controls how long a track can disappear before it is
+marked inactive. `APP_FLOW_DIRECTION_MIN_DX_RATIO` controls the minimum
+horizontal movement, relative to frame width, required before a track is counted
+as `Left to Right` or `Right to Left`.
 
 Adaptive ROI options:
 
@@ -430,6 +444,17 @@ the selected metric range:
 1 Hour = unique vehicles seen in the latest 3600 seconds
 All    = unique vehicles seen across the whole current stream
 ```
+
+`Left to Right` counts track IDs whose bbox center moves enough in the positive
+X direction during the selected range. `Right to Left` counts track IDs whose
+bbox center moves enough in the negative X direction during the selected range.
+Each track is counted once after its horizontal displacement exceeds
+`APP_FLOW_DIRECTION_MIN_DX_RATIO * frame_width`. For stricter lane-specific
+counts, add a counting line/counter zone.
+
+The bottom chart uses the same selector as the metric cards. `1 Min` and `All`
+show vehicle counts grouped by minute; `1 Hour` shows vehicle counts grouped by
+hour. Each bucket counts unique `track_id` values seen in that bucket.
 
 If the stream has not been running long enough to fill the selected window, the
 backend counts over the history that is already available. Accurate totals
@@ -504,6 +529,9 @@ Form data:
 file: video file
 ```
 
+The backend rejects videos larger than `APP_MAX_VIDEO_UPLOAD_MB` with HTTP
+`413`.
+
 Response:
 
 ```json
@@ -542,7 +570,7 @@ Response:
     "alert_label": "BUSY",
     "alert_message": "Traffic is increasing"
   },
-  "live_series": [{ "t": "12:00:01", "count": 4 }],
+  "live_series": [{ "t": "12:00", "count": 14 }],
   "analytics": {
     "avg_objects": 3.2,
     "series": [{ "frame": 1, "count": 2 }]
@@ -568,9 +596,16 @@ GET /api/video/{job_id}/metrics/export?avg_window=minute
 
 Downloads an `.xlsx` workbook with:
 
-- `Summary`: job id, selected total window, latest values.
-- `History`: timestamp, active objects, 1-minute total, 1-hour total,
-  occupancy, PCE, alert, and FPS for the recorded realtime stream points.
+- `Theo phút`: data grouped by minute.
+- `Theo giờ`: data grouped by hour.
+
+Each sheet includes:
+
+- `Thời gian`: bucket start time.
+- `Tổng số xe`: unique tracked vehicles in that minute/hour.
+- `Xe đi vào (phải sang trái)`: vehicles moving right to left.
+- `Xe đi ra (trái sang phải)`: vehicles moving left to right.
+- `Xe máy`, `Ô tô`, `Xe buýt`, `Xe tải`: unique tracked vehicles by class.
 
 ### Start Offline Video Processing
 

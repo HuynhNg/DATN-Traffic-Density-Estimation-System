@@ -1,6 +1,8 @@
 export const IMAGE_ACCEPT = "image/jpeg,image/png,image/webp";
 export const VIDEO_ACCEPT =
   "video/mp4,video/quicktime,video/x-msvideo,video/x-matroska,video/webm";
+export const MAX_VIDEO_UPLOAD_MB =
+  Number(import.meta.env.VITE_MAX_VIDEO_UPLOAD_MB) || 500;
 
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp"];
@@ -33,4 +35,8 @@ export function isAllowedImage(file) {
 
 export function isAllowedVideo(file) {
   return isAllowedFile(file, VIDEO_TYPES, VIDEO_EXTS);
+}
+
+export function isAllowedVideoSize(file) {
+  return file.size <= MAX_VIDEO_UPLOAD_MB * 1024 * 1024;
 }

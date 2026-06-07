@@ -10,7 +10,12 @@ import {
 import Toggle from "../components/Toggle.jsx";
 import StatCard from "../components/StatCard.jsx";
 import ChartPanel from "../components/ChartPanel.jsx";
-import { VIDEO_ACCEPT, isAllowedVideo } from "../utils/fileTypes.js";
+import {
+  MAX_VIDEO_UPLOAD_MB,
+  VIDEO_ACCEPT,
+  isAllowedVideo,
+  isAllowedVideoSize,
+} from "../utils/fileTypes.js";
 
 const PREVIEW_PANEL_CLASS =
   "mt-6 flex h-[420px] items-center justify-center rounded-2xl border " +
@@ -20,6 +25,10 @@ const DEFAULT_METRICS = {
   fps: 0,
   avg_objects: 0,
   total_vehicles: 0,
+  vehicles_left_to_right: 0,
+  vehicles_right_to_left: 0,
+  vehicles_in: 0,
+  vehicles_out: 0,
   objects_in_frame: 0,
   occupancy_pct: 0,
   pce_count: 0,
@@ -186,6 +195,12 @@ export default function VideoMode() {
 
     if (!isAllowedVideo(file)) {
       setError("Unsupported video type. Use MP4, MOV, AVI, MKV, or WEBM.");
+      return;
+    }
+    if (!isAllowedVideoSize(file)) {
+      setError(
+        `Video file is too large. Maximum allowed size is ${MAX_VIDEO_UPLOAD_MB} MB.`
+      );
       return;
     }
     setError(null);
@@ -396,7 +411,7 @@ export default function VideoMode() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `traffic_metrics_${jobId}_${avgWindow}.xlsx`;
+      link.download = `traffic_metrics_${jobId}.xlsx`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -598,6 +613,14 @@ export default function VideoMode() {
                 title="Total Vehicles"
                 value={metrics.total_vehicles ?? metrics.avg_objects}
               />
+              <StatCard
+                title="Left to Right"
+                value={metrics.vehicles_left_to_right ?? metrics.vehicles_in ?? 0}
+              />
+              <StatCard
+                title="Right to Left"
+                value={metrics.vehicles_right_to_left ?? metrics.vehicles_out ?? 0}
+              />
               <StatCard title="Active Objects" value={metrics.objects_in_frame} />
               <StatCard
                 title="PCE Count"
@@ -620,7 +643,7 @@ export default function VideoMode() {
           </div>
         </div>
 
-        <ChartPanel data={series} />
+        <ChartPanel data={series} windowMode={avgWindow} />
       </div>
     </section>
   );

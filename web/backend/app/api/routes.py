@@ -4,7 +4,6 @@ import asyncio
 import base64
 import logging
 import os
-import shutil
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -64,6 +63,7 @@ ALLOWED_VIDEO_TYPES = {
 }
 ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AVG_WINDOW_SECONDS = {"minute": 60.0, "hour": 3600.0}
+UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass
@@ -123,14 +123,33 @@ def _encode_jpeg(frame: np.ndarray) -> bytes:
     return buffer.tobytes()
 
 
-def _save_upload(file: UploadFile) -> str:
+def _save_upload(file: UploadFile, max_bytes: int | None = None) -> str:
     os.makedirs(settings.save_dir, exist_ok=True)
     temp_id = str(uuid.uuid4())
     safe_name = Path(file.filename).name if file.filename else "upload.bin"
     input_path = os.path.join(settings.save_dir, f"{temp_id}_{safe_name}")
 
-    with open(input_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    written = 0
+    try:
+        with open(input_path, "wb") as f:
+            while True:
+                chunk = file.file.read(UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if max_bytes is not None and written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            "Video file is too large. "
+                            f"Maximum allowed size is {settings.max_video_upload_mb} MB."
+                        ),
+                    )
+                f.write(chunk)
+    except Exception:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        raise
 
     return input_path
 
@@ -232,17 +251,176 @@ def _total_vehicles_for_window(
     return int(rows[-1].get("objects_in_frame", 0))
 
 
+def _bucket_label(bucket_start: float, avg_window: str) -> str:
+    if avg_window == "hour":
+        return time.strftime("%H:00", time.localtime(bucket_start))
+    return time.strftime("%H:%M", time.localtime(bucket_start))
+
+
+def _vehicle_series_for_window(
+    history: list[dict[str, Any]],
+    avg_window: str,
+    limit: int = 60,
+) -> list[dict[str, Any]]:
+    if not history:
+        return []
+
+    rows = sorted(history, key=lambda row: float(row.get("timestamp", 0.0)))
+    bucket_seconds = 3600 if avg_window == "hour" else 60
+    buckets: dict[int, dict[str, Any]] = {}
+
+    for row in rows:
+        row_ts = float(row.get("timestamp", 0.0))
+        bucket_start = int(row_ts // bucket_seconds) * bucket_seconds
+        bucket = buckets.setdefault(
+            bucket_start,
+            {
+                "track_ids": set(),
+                "fallback_count": 0,
+            },
+        )
+        track_ids = _track_ids_from_row(row)
+        bucket["track_ids"].update(track_ids)
+        bucket["fallback_count"] = max(
+            int(bucket["fallback_count"]),
+            int(row.get("objects_in_frame", 0)),
+        )
+
+    series: list[dict[str, Any]] = []
+    for bucket_start in sorted(buckets)[-limit:]:
+        bucket = buckets[bucket_start]
+        track_ids = bucket["track_ids"]
+        count = len(track_ids) if track_ids else int(bucket["fallback_count"])
+        series.append(
+            {
+                "t": _bucket_label(float(bucket_start), avg_window),
+                "count": count,
+            }
+        )
+    return series
+
+
+def _flow_count_for_window(
+    events: list[dict[str, Any]],
+    event_type: str,
+    avg_window: str,
+    now: float | None = None,
+) -> int:
+    if not events:
+        return 0
+
+    current_ts = now if now is not None else float(events[-1].get("timestamp", time.time()))
+    if avg_window == "all":
+        window_events = events
+    else:
+        cutoff = current_ts - AVG_WINDOW_SECONDS[avg_window]
+        window_events = [
+            event for event in events if float(event.get("timestamp", 0.0)) >= cutoff
+        ]
+    return sum(1 for event in window_events if event.get("type") == event_type)
+
+
 def _live_metrics_for_window(job: VideoJob, avg_window: str) -> dict[str, Any] | None:
     if job.live_metrics is None:
         return None
 
     metrics = dict(job.live_metrics)
     history = job.live_history or []
+    flow_events = job.live_flow_events or []
+    now = (
+        float(history[-1].get("timestamp", time.time()))
+        if history
+        else time.time()
+    )
     total_vehicles = _total_vehicles_for_window(history, avg_window)
     metrics["total_vehicles"] = total_vehicles
     metrics["avg_objects"] = total_vehicles
+    left_to_right = _flow_count_for_window(flow_events, "left_to_right", avg_window, now)
+    right_to_left = _flow_count_for_window(flow_events, "right_to_left", avg_window, now)
+    metrics["vehicles_left_to_right"] = left_to_right
+    metrics["vehicles_right_to_left"] = right_to_left
+    metrics["vehicles_in"] = left_to_right
+    metrics["vehicles_out"] = right_to_left
     metrics["avg_window"] = avg_window
     return metrics
+
+
+def _track_center(track: dict[str, Any]) -> tuple[float, float]:
+    return (
+        (float(track["x1"]) + float(track["x2"])) / 2.0,
+        (float(track["y1"]) + float(track["y2"])) / 2.0,
+    )
+
+
+def _update_flow_events(
+    job: VideoJob,
+    tracked: list[dict[str, Any]],
+    now: float,
+    frame_width: int,
+) -> None:
+    if job.live_track_states is None:
+        job.live_track_states = {}
+    if job.live_flow_events is None:
+        job.live_flow_events = []
+
+    active_ids: set[int] = set()
+    for track in tracked:
+        raw_track_id = track.get("track_id")
+        if raw_track_id is None:
+            continue
+
+        track_id = int(raw_track_id)
+        active_ids.add(track_id)
+        center = _track_center(track)
+        state = job.live_track_states.get(track_id)
+        if state is None or not state.get("active", False):
+            state = {
+                "first_seen": now,
+                "first_center": center,
+                "active": True,
+                "direction_counted": False,
+            }
+
+        first_center = state.get("first_center") or center
+        dx = center[0] - float(first_center[0])
+        min_dx = max(float(frame_width) * settings.flow_direction_min_dx_ratio, 1.0)
+        if not state.get("direction_counted", False) and abs(dx) >= min_dx:
+            event_type = "left_to_right" if dx > 0 else "right_to_left"
+            job.live_flow_events.append(
+                {
+                    "timestamp": round(now, 3),
+                    "time": time.strftime("%H:%M:%S", time.localtime(now)),
+                    "type": event_type,
+                    "track_id": track_id,
+                    "class_name": track.get("class_name", ""),
+                    "x": round(center[0], 2),
+                    "y": round(center[1], 2),
+                    "dx": round(dx, 2),
+                }
+            )
+            state["direction_counted"] = True
+
+        state.update(
+            {
+                "last_seen": now,
+                "last_center": center,
+                "class_name": track.get("class_name", ""),
+                "active": True,
+            }
+        )
+        job.live_track_states[track_id] = state
+
+    timeout = max(float(settings.flow_exit_timeout_sec), 0.0)
+    for track_id, state in list(job.live_track_states.items()):
+        if track_id in active_ids or not state.get("active", False):
+            continue
+
+        last_seen = float(state.get("last_seen", now))
+        if now - last_seen < timeout:
+            continue
+
+        state["active"] = False
+        job.live_track_states[track_id] = state
 
 
 def _update_stream_roi_state(
@@ -424,6 +602,8 @@ def _update_live_metrics(
     occupancy, pce_total = compute_metrics(tracked, roi_mask)
     alert_level, alert_message = decide_alert(occupancy, pce_total)
     now = time.time()
+    _update_flow_events(job, tracked, now, roi_mask.shape[1])
+    flow_events = job.live_flow_events or []
 
     metric_row = {
         "timestamp": round(now, 3),
@@ -437,6 +617,14 @@ def _update_live_metrics(
                 if track.get("track_id") is not None
             }
         ),
+        "track_classes": [
+            {
+                "track_id": int(track["track_id"]),
+                "class_name": track.get("class_name", ""),
+            }
+            for track in tracked
+            if track.get("track_id") is not None
+        ],
         "occupancy_pct": round(occupancy, 2),
         "pce_count": round(pce_total, 2),
         "alert_level": alert_level,
@@ -448,10 +636,16 @@ def _update_live_metrics(
     job.live_history.append(metric_row)
 
     total_vehicles = _total_vehicles_for_window(job.live_history, "minute", now)
+    left_to_right = _flow_count_for_window(flow_events, "left_to_right", "minute", now)
+    right_to_left = _flow_count_for_window(flow_events, "right_to_left", "minute", now)
     job.live_metrics = {
         **metrics,
         "avg_objects": total_vehicles,
         "total_vehicles": total_vehicles,
+        "vehicles_left_to_right": left_to_right,
+        "vehicles_right_to_left": right_to_left,
+        "vehicles_in": left_to_right,
+        "vehicles_out": right_to_left,
         "avg_window": "minute",
         "occupancy_pct": round(occupancy, 2),
         "pce_count": round(pce_total, 2),
@@ -516,7 +710,8 @@ async def upload_video(
     conf: bool = True,
 ) -> dict[str, Any]:
     _validate_upload(file, ALLOWED_VIDEO_TYPES, ALLOWED_VIDEO_EXTS, "video")
-    input_path = _save_upload(file)
+    max_bytes = max(int(settings.max_video_upload_mb), 1) * 1024 * 1024
+    input_path = _save_upload(file, max_bytes=max_bytes)
     fps, total_frames = _read_video_metadata(input_path)
 
     job = router.video_jobs.create()  # type: ignore[attr-defined]
@@ -551,7 +746,10 @@ async def get_video_status(
         "fps": job.fps,
         "total_frames": job.total_frames,
         "live_metrics": _live_metrics_for_window(job, normalized_window),
-        "live_series": job.live_series,
+        "live_series": _vehicle_series_for_window(
+            job.live_history or [],
+            normalized_window,
+        ),
         "roi": job.manual_roi or job.roi,
         "roi_box": job.manual_roi_box or job.roi_box,
         "roi_source": "manual" if job.manual_roi or job.manual_roi_box else job.roi_source,
@@ -575,10 +773,19 @@ async def export_video_metrics(
         history[-1] = {
             **history[-1],
             "total_vehicles": latest_metrics["total_vehicles"],
+            "vehicles_left_to_right": latest_metrics["vehicles_left_to_right"],
+            "vehicles_right_to_left": latest_metrics["vehicles_right_to_left"],
+            "vehicles_in": latest_metrics["vehicles_left_to_right"],
+            "vehicles_out": latest_metrics["vehicles_right_to_left"],
         }
 
-    content = build_metrics_workbook(job.job_id, history, normalized_window)
-    filename = f"traffic_metrics_{job.job_id}_{normalized_window}.xlsx"
+    content = build_metrics_workbook(
+        job.job_id,
+        history,
+        normalized_window,
+        job.live_flow_events or [],
+    )
+    filename = f"traffic_metrics_{job.job_id}.xlsx"
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

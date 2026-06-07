@@ -9,6 +9,7 @@ import logging
 
 from app.core.logging import setup_logging
 from app.services.inference import InferenceEngine
+from app.services.storage import clean_storage_dir
 from app.services.video_jobs import VideoJobStore
 
 
@@ -28,6 +29,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Clean transient uploads and generated artifacts before accepting new jobs.
+if settings.clean_storage_on_startup:
+    clean_storage_dir(settings.save_dir)
+
 # Initialize inference engine and video job store for API routes.
 router.engine = InferenceEngine()  # type: ignore[attr-defined]
 logger.info(
@@ -36,4 +41,3 @@ logger.info(
 )
 router.video_jobs = VideoJobStore()  # type: ignore[attr-defined]
 app.include_router(router)
-

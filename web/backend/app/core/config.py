@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     jpeg_quality: int = 85
     stream_max_dim: int = 640
     save_dir: str = "storage"
+    max_video_upload_mb: int = 500
+    clean_storage_on_startup: bool = True
     auto_process_video: bool = False
     log_detections: bool = False
 
@@ -47,6 +49,9 @@ class Settings(BaseSettings):
     bytetrack_frame_skip: int = 1
     bytetrack_repair_enabled: bool = True
     bytetrack_repair_iou: float = 0.50
+
+    flow_exit_timeout_sec: float = 2.0
+    flow_direction_min_dx_ratio: float = 0.03
 
     class_names: list[str] = ["car", "truck", "bus", "motor"]
     allowed_origins: list[str] = ["*"]
