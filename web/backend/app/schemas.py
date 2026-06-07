@@ -31,6 +31,7 @@ class LiveMetrics(BaseModel):
 
     fps: float
     avg_objects: float
+    total_vehicles: int | None = None
     objects_in_frame: int
     pce_count: float | None = None
     occupancy_pct: float | None = None

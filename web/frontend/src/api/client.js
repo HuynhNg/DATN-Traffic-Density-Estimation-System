@@ -49,10 +49,21 @@ export async function uploadVideo(file, { labels, conf }) {
 }
 
 // Fetch status and metrics for a video job.
-export async function getVideoStatus(jobId) {
-  const res = await fetch(`${API_BASE}/api/video/${jobId}`);
+export async function getVideoStatus(jobId, { avgWindow = "minute" } = {}) {
+  const params = new URLSearchParams({ avg_window: avgWindow });
+  const res = await fetch(`${API_BASE}/api/video/${jobId}?${params.toString()}`);
   await assertOk(res, "Video status failed");
   return res.json();
+}
+
+// Download realtime metrics history as an Excel workbook.
+export async function exportVideoMetrics(jobId, { avgWindow = "minute" } = {}) {
+  const params = new URLSearchParams({ avg_window: avgWindow });
+  const res = await fetch(
+    `${API_BASE}/api/video/${jobId}/metrics/export?${params.toString()}`
+  );
+  await assertOk(res, "Metrics export failed");
+  return res.blob();
 }
 
 // Start offline video processing for a previously uploaded video.

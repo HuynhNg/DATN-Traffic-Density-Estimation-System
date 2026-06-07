@@ -24,10 +24,12 @@ class Settings(BaseSettings):
     stream_max_dim: int = 640
     save_dir: str = "storage"
     auto_process_video: bool = False
+    log_detections: bool = False
 
     roi_enabled: bool = False
     roi_mode: str = "mask"
     roi_anchor: str = "bottom_center"
+    roi_min_bbox_overlap: float = 0.10
     roi_calib_frames: int = 100
     roi_min_area_ratio: float = 0.05
     roi_otsu_bias: float = 1.05
@@ -39,10 +41,12 @@ class Settings(BaseSettings):
 
     bytetrack_enabled: bool = True
     bytetrack_conf_high: float = 0.5
-    bytetrack_iou_high: float = 0.3
+    bytetrack_iou_high: float = 0.8
     bytetrack_track_buffer: int = 30
     bytetrack_min_box_area: int = 400
     bytetrack_frame_skip: int = 1
+    bytetrack_repair_enabled: bool = True
+    bytetrack_repair_iou: float = 0.50
 
     class_names: list[str] = ["car", "truck", "bus", "motor"]
     allowed_origins: list[str] = ["*"]

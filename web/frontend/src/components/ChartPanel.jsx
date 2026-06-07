@@ -15,9 +15,9 @@ export default function ChartPanel({ data }) {
       <div className="mb-3 flex items-center justify-between">
         <div>
           <h3 className="text-base font-semibold">Vehicle Volume Trend</h3>
-          <p className="text-xs text-slate-500">Aggregated throughput</p>
+          <p className="text-xs text-slate-500">Realtime frame counts</p>
         </div>
-        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">Last 6 hours</span>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">Last 60 points</span>
       </div>
       <div className="h-56">
         <ResponsiveContainer width="100%" height="100%">

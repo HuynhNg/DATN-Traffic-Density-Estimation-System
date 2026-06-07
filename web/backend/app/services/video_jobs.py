@@ -39,6 +39,7 @@ class VideoJob:
     input_path: str | None = None
     live_metrics: dict | None = None
     live_series: list[dict[str, Any]] | None = None
+    live_history: list[dict[str, Any]] | None = None
     roi: dict[str, Any] | None = None
     roi_box: dict[str, float] | None = None
     roi_source: str | None = None
@@ -152,6 +153,7 @@ def process_video(
                         detections,
                         current_roi,
                         anchor=settings.roi_anchor,
+                        min_bbox_overlap=settings.roi_min_bbox_overlap,
                     )
                     det_array = detections_to_array(detections)
                     if run_tracker:

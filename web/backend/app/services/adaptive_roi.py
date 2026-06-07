@@ -434,18 +434,27 @@ def compute_adaptive_roi(
     )
 
 
-# Keep detections whose anchor point falls inside the ROI mask.
+# Keep detections whose anchor point or bbox overlap falls inside the ROI mask.
 def filter_detections_by_roi_xyxy(
     detections: list[dict[str, Any]],
     roi: ROIResult,
     anchor: str = "bottom_center",
+    min_bbox_overlap: float = 0.0,
 ) -> list[dict[str, Any]]:
     h, w = roi.frame_shape
     mask = roi.combined_mask
     valid: list[dict[str, Any]] = []
+    min_bbox_overlap = max(0.0, min(float(min_bbox_overlap), 1.0))
 
     for det in detections:
         x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
+        x1 = max(0, min(int(x1), w - 1))
+        y1 = max(0, min(int(y1), h - 1))
+        x2 = max(0, min(int(x2), w))
+        y2 = max(0, min(int(y2), h))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
         cx = int((x1 + x2) / 2)
 
         if anchor == "bottom_center":
@@ -457,6 +466,15 @@ def filter_detections_by_roi_xyxy(
         py = max(0, min(py, h - 1))
 
         if mask[py, px] > 0:
+            valid.append(det)
+            continue
+
+        if min_bbox_overlap <= 0:
+            continue
+
+        bbox_area = float((x2 - x1) * (y2 - y1))
+        roi_pixels_in_bbox = float(np.sum(mask[y1:y2, x1:x2] > 0))
+        if bbox_area > 0 and roi_pixels_in_bbox / bbox_area >= min_bbox_overlap:
             valid.append(det)
 
     return valid

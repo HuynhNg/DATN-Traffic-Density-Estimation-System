@@ -14,8 +14,8 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from app.core.config import settings
 from app.services.adaptive_roi import (
@@ -36,10 +36,12 @@ from app.services.adaptive_roi import (
 from app.services.analytics import AnalyticsTracker
 from app.services.frame_utils import resize_to_max
 from app.services.inference import InferenceEngine
+from app.services.metrics_export import build_metrics_workbook
 from app.services.renderer import render_boxes
 from app.services.tracking import (
     ByteTrackWrapper,
     detections_to_array,
+    repair_tracked_detections,
     tracks_to_detections,
 )
 from app.services.traffic_metrics import compute_metrics, decide_alert
@@ -61,6 +63,7 @@ ALLOWED_VIDEO_TYPES = {
     "video/webm",
 }
 ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+AVG_WINDOW_SECONDS = {"minute": 60.0, "hour": 3600.0}
 
 
 @dataclass
@@ -183,6 +186,65 @@ def _validate_roi_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return roi_payload
 
 
+def _normalize_avg_window(avg_window: str) -> str:
+    window = avg_window.lower().strip()
+    if window in AVG_WINDOW_SECONDS or window == "all":
+        return window
+    raise HTTPException(
+        status_code=400,
+        detail="avg_window must be one of: minute, hour, all",
+    )
+
+
+def _track_ids_from_row(row: dict[str, Any]) -> set[int]:
+    track_ids = row.get("track_ids")
+    if not isinstance(track_ids, list):
+        return set()
+    return {int(track_id) for track_id in track_ids if track_id is not None}
+
+
+def _total_vehicles_for_window(
+    history: list[dict[str, Any]],
+    avg_window: str,
+    now: float | None = None,
+) -> int:
+    if not history:
+        return 0
+
+    rows = sorted(history, key=lambda row: float(row.get("timestamp", 0.0)))
+    current_ts = now if now is not None else float(rows[-1].get("timestamp", time.time()))
+    if avg_window == "all":
+        window_rows = rows
+    else:
+        cutoff = current_ts - AVG_WINDOW_SECONDS[avg_window]
+        window_rows = [
+            row for row in rows if float(row.get("timestamp", 0.0)) >= cutoff
+        ]
+
+    unique_track_ids: set[int] = set()
+    for row in window_rows:
+        unique_track_ids.update(_track_ids_from_row(row))
+    if unique_track_ids:
+        return len(unique_track_ids)
+
+    # Without tracker IDs, the backend cannot know whether two detections across
+    # frames are the same physical vehicle. Fall back to the latest frame count.
+    return int(rows[-1].get("objects_in_frame", 0))
+
+
+def _live_metrics_for_window(job: VideoJob, avg_window: str) -> dict[str, Any] | None:
+    if job.live_metrics is None:
+        return None
+
+    metrics = dict(job.live_metrics)
+    history = job.live_history or []
+    total_vehicles = _total_vehicles_for_window(history, avg_window)
+    metrics["total_vehicles"] = total_vehicles
+    metrics["avg_objects"] = total_vehicles
+    metrics["avg_window"] = avg_window
+    return metrics
+
+
 def _update_stream_roi_state(
     state: StreamROIState,
     frame: np.ndarray,
@@ -246,24 +308,62 @@ def _init_bytetracker(job_id: str, source_fps: float) -> ByteTrackWrapper | None
         return None
 
 
+def _format_detection_for_log(det: dict[str, Any]) -> str:
+    track_id = det.get("track_id")
+    track_text = f" track={track_id}" if track_id is not None else ""
+    return (
+        f"{det.get('class_name', det.get('class_id'))}"
+        f"(id={det.get('class_id')})"
+        f" conf={float(det.get('confidence', 0.0)):.3f}"
+        f" bbox=({int(det.get('x1', 0))},{int(det.get('y1', 0))},"
+        f"{int(det.get('x2', 0))},{int(det.get('y2', 0))})"
+        f"{track_text}"
+    )
+
+
+def _log_detections(
+    stage: str,
+    job_id: str,
+    frame_idx: int,
+    detections: list[dict[str, Any]],
+) -> None:
+    if not settings.log_detections:
+        return
+    details = " | ".join(_format_detection_for_log(det) for det in detections)
+    logger.info(
+        "bbox_debug stage=%s job=%s frame=%d count=%d %s",
+        stage,
+        job_id,
+        frame_idx,
+        len(detections),
+        details,
+    )
+
+
 def _detect_stream_frame(
     frame: np.ndarray,
     engine: InferenceEngine,
     roi: ROIResult | None,
+    job_id: str,
+    frame_idx: int,
 ) -> tuple[list[dict[str, Any]], np.ndarray]:
     if roi is None:
         roi_mask = np.ones(frame.shape[:2], dtype=np.uint8) * 255
         detections, _ = engine.detect(frame)
+        _log_detections("raw_no_roi", job_id, frame_idx, detections)
         return detections, roi_mask
 
     processed, offset = apply_roi_to_frame(frame, roi, mode=settings.roi_mode)
     detections, _ = engine.detect(processed)
     detections = remap_detections_to_original(detections, offset)
+    _log_detections("raw_before_roi_filter", job_id, frame_idx, detections)
     detections = filter_detections_by_roi_xyxy(
         detections,
         roi,
         anchor=settings.roi_anchor,
+        min_bbox_overlap=settings.roi_min_bbox_overlap,
     )
+    _log_detections("after_roi_filter", job_id, frame_idx, detections)
     return detections, roi.combined_mask
 
 
@@ -287,17 +387,31 @@ def _track_stream_detections(
     bytetracker: ByteTrackWrapper | None,
     run_tracker: bool,
     last_tracked: list[dict[str, Any]] | None,
+    job_id: str,
+    frame_idx: int,
 ) -> list[dict[str, Any]]:
     if bytetracker is None:
+        _log_detections("tracking_disabled", job_id, frame_idx, detections)
         return detections
     if not run_tracker:
-        return last_tracked or detections
+        tracked = last_tracked or detections
+        _log_detections("tracking_reused_last", job_id, frame_idx, tracked)
+        return tracked
 
     det_array = detections_to_array(detections)
-    return tracks_to_detections(
+    tracked = tracks_to_detections(
         bytetracker.update(det_array, frame),
         settings.class_names,
     )
+    if settings.bytetrack_repair_enabled:
+        tracked = repair_tracked_detections(
+            detections,
+            tracked,
+            last_tracked,
+            settings.bytetrack_repair_iou,
+        )
+    _log_detections("after_bytetrack", job_id, frame_idx, tracked)
+    return tracked
 
 
 def _update_live_metrics(
@@ -309,9 +423,36 @@ def _update_live_metrics(
     metrics = tracker.update(len(tracked))
     occupancy, pce_total = compute_metrics(tracked, roi_mask)
     alert_level, alert_message = decide_alert(occupancy, pce_total)
+    now = time.time()
 
+    metric_row = {
+        "timestamp": round(now, 3),
+        "time": time.strftime("%H:%M:%S", time.localtime(now)),
+        "fps": metrics["fps"],
+        "objects_in_frame": metrics["objects_in_frame"],
+        "track_ids": sorted(
+            {
+                int(track["track_id"])
+                for track in tracked
+                if track.get("track_id") is not None
+            }
+        ),
+        "occupancy_pct": round(occupancy, 2),
+        "pce_count": round(pce_total, 2),
+        "alert_level": alert_level,
+        "alert_label": alert_message[0],
+    }
+
+    if job.live_history is None:
+        job.live_history = []
+    job.live_history.append(metric_row)
+
+    total_vehicles = _total_vehicles_for_window(job.live_history, "minute", now)
     job.live_metrics = {
         **metrics,
+        "avg_objects": total_vehicles,
+        "total_vehicles": total_vehicles,
+        "avg_window": "minute",
         "occupancy_pct": round(occupancy, 2),
         "pce_count": round(pce_total, 2),
         "alert_level": alert_level,
@@ -322,7 +463,7 @@ def _update_live_metrics(
     if job.live_series is None:
         job.live_series = []
     job.live_series.append(
-        {"t": time.strftime("%H:%M:%S"), "count": metrics["objects_in_frame"]}
+        {"t": metric_row["time"], "count": metrics["objects_in_frame"]}
     )
     job.live_series = job.live_series[-60:]
 
@@ -391,10 +532,15 @@ async def upload_video(
 
 @router.get("/video/{job_id}")
 # Fetch processing status and metrics for a video job.
-async def get_video_status(job_id: str) -> dict[str, Any]:
+async def get_video_status(
+    job_id: str,
+    avg_window: str = Query("minute"),
+) -> dict[str, Any]:
     job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    normalized_window = _normalize_avg_window(avg_window)
 
     return {
         "job_id": job.job_id,
@@ -404,12 +550,40 @@ async def get_video_status(job_id: str) -> dict[str, Any]:
         "analytics": job.analytics,
         "fps": job.fps,
         "total_frames": job.total_frames,
-        "live_metrics": job.live_metrics,
+        "live_metrics": _live_metrics_for_window(job, normalized_window),
         "live_series": job.live_series,
         "roi": job.manual_roi or job.roi,
         "roi_box": job.manual_roi_box or job.roi_box,
         "roi_source": "manual" if job.manual_roi or job.manual_roi_box else job.roi_source,
     }
+
+
+@router.get("/video/{job_id}/metrics/export")
+# Export realtime metrics history as an Excel workbook.
+async def export_video_metrics(
+    job_id: str,
+    avg_window: str = Query("minute"),
+) -> Response:
+    job = router.video_jobs.get(job_id)  # type: ignore[attr-defined]
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    normalized_window = _normalize_avg_window(avg_window)
+    history = list(job.live_history or [])
+    latest_metrics = _live_metrics_for_window(job, normalized_window)
+    if history and latest_metrics is not None:
+        history[-1] = {
+            **history[-1],
+            "total_vehicles": latest_metrics["total_vehicles"],
+        }
+
+    content = build_metrics_workbook(job.job_id, history, normalized_window)
+    filename = f"traffic_metrics_{job.job_id}_{normalized_window}.xlsx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/video/{job_id}/process")
@@ -528,13 +702,21 @@ async def stream_video(
                     resized.shape[:2],
                     roi_updater,
                 )
-                detections, roi_mask = _detect_stream_frame(resized, engine, current_roi)
+                detections, roi_mask = _detect_stream_frame(
+                    resized,
+                    engine,
+                    current_roi,
+                    job.job_id,
+                    stream_idx,
+                )
                 tracked = _track_stream_detections(
                     detections,
                     resized,
                     bytetracker,
                     run_tracker,
                     last_tracked,
+                    job.job_id,
+                    stream_idx,
                 )
                 if run_tracker:
                     last_tracked = tracked

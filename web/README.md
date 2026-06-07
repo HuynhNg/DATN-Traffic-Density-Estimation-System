@@ -12,8 +12,9 @@ video workflows.
   output.
 - Streams annotated MJPEG previews for uploaded videos.
 - Tracks vehicles across frames with ByteTrack when enabled.
-- Computes live traffic metrics: FPS, active objects, average objects,
+- Computes live traffic metrics: FPS, active objects, total vehicles by window,
   occupancy, PCE count, and congestion alert level.
+- Exports realtime metric history to Excel for later analysis.
 - Displays detection results, live metrics, and time-series charts in the
   frontend.
 
@@ -119,7 +120,7 @@ User clicks Run AI
   -> ROI filtering and overlay are applied only after enough calibration frames
   -> users can edit the polygon ROI overlay; manual ROI overrides auto ROI
   -> each streamed frame is optionally tracked, rendered, and JPEG encoded
-  -> backend updates live_metrics and live_series on the video job
+  -> backend updates live_metrics, live_series, and exportable metric history
   -> frontend displays MJPEG stream, live cards, alert badge, and chart
 ```
 
@@ -360,22 +361,35 @@ APP_FRAME_SKIP=1
 APP_JPEG_QUALITY=85
 APP_STREAM_MAX_DIM=640
 APP_AUTO_PROCESS_VIDEO=false
+APP_LOG_DETECTIONS=false
 ```
 
 `APP_AUTO_PROCESS_VIDEO=false` avoids running offline video processing at the
 same time as the realtime MJPEG stream. Enable it only when you explicitly need
 processed MP4 files to be generated immediately after upload.
 
+Set `APP_LOG_DETECTIONS=true` while debugging ByteTrack. The backend logs each
+stream frame's bounding boxes before ROI filtering, after ROI filtering, and
+after ByteTrack with class name, class id, confidence, bbox coordinates, and
+track id when available.
+
 ByteTrack options:
 
 ```text
 APP_BYTETRACK_ENABLED=true
 APP_BYTETRACK_CONF_HIGH=0.5
-APP_BYTETRACK_IOU_HIGH=0.3
+APP_BYTETRACK_IOU_HIGH=0.8
 APP_BYTETRACK_TRACK_BUFFER=30
 APP_BYTETRACK_MIN_BOX_AREA=400
 APP_BYTETRACK_FRAME_SKIP=1
+APP_BYTETRACK_REPAIR_ENABLED=true
+APP_BYTETRACK_REPAIR_IOU=0.50
 ```
+
+For BoxMOT ByteTrack, `APP_BYTETRACK_IOU_HIGH` maps to `match_thresh`. Higher
+values are more tolerant during association. The repair options keep a previous
+`track_id` when the current detection still overlaps strongly with the previous
+tracked bbox, which reduces one-frame drops and track-id churn on small motors.
 
 Adaptive ROI options:
 
@@ -383,6 +397,7 @@ Adaptive ROI options:
 APP_ROI_ENABLED=true
 APP_ROI_MODE=mask
 APP_ROI_ANCHOR=bottom_center
+APP_ROI_MIN_BBOX_OVERLAP=0.10
 APP_ROI_CALIB_FRAMES=100
 APP_ROI_DRAW=true
 APP_ROI_DRAW_ALPHA=0.25
@@ -396,11 +411,32 @@ frames. Auto ROI is computed once and is not periodically recalibrated.
 Set `APP_ROI_ENABLED=false` and `APP_ROI_DRAW=false` if you want to run full
 frame detection without ROI calibration or overlay drawing.
 
+ROI filtering keeps a detection when either the configured anchor point is
+inside the ROI or at least `APP_ROI_MIN_BBOX_OVERLAP` of the bbox area overlaps
+the ROI mask. This avoids dropping small motor boxes whose anchor point jitters
+slightly outside the ROI boundary.
+
 When auto ROI is ready in Video Mode, the frontend shows an editable polygon ROI
 over the MJPEG stream. Drag the polygon to move it, drag individual vertices to
 reshape it, or add/remove vertices when the road area needs more than four
 points. The frontend saves normalized ROI coordinates to the backend, and that
 manual ROI is used for subsequent detection frames.
+
+`Total Vehicles` in realtime mode counts unique ByteTrack `track_id` values in
+the selected metric range:
+
+```text
+1 Min  = unique vehicles seen in the latest 60 seconds
+1 Hour = unique vehicles seen in the latest 3600 seconds
+All    = unique vehicles seen across the whole current stream
+```
+
+If the stream has not been running long enough to fill the selected window, the
+backend counts over the history that is already available. Accurate totals
+require ByteTrack to be enabled so the same physical vehicle keeps a stable
+`track_id` across frames. If no `track_id` is available, the backend falls back
+to the latest active object count because it cannot reliably know whether a
+detection in two frames is the same vehicle.
 
 ## API Reference
 
@@ -481,8 +517,10 @@ Response:
 ### Video Status
 
 ```http
-GET /api/video/{job_id}
+GET /api/video/{job_id}?avg_window=minute
 ```
+
+`avg_window` accepts `minute`, `hour`, or `all`.
 
 Response:
 
@@ -521,6 +559,18 @@ Response:
   "roi_source": "auto"
 }
 ```
+
+### Export Metrics Excel
+
+```http
+GET /api/video/{job_id}/metrics/export?avg_window=minute
+```
+
+Downloads an `.xlsx` workbook with:
+
+- `Summary`: job id, selected total window, latest values.
+- `History`: timestamp, active objects, 1-minute total, 1-hour total,
+  occupancy, PCE, alert, and FPS for the recorded realtime stream points.
 
 ### Start Offline Video Processing
 

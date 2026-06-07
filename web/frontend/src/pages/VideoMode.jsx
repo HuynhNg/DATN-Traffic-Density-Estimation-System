@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   API_BASE,
+  exportVideoMetrics,
   getVideoStatus,
   resetVideoRoi,
   setVideoRoi,
@@ -18,6 +19,7 @@ const PREVIEW_PANEL_CLASS =
 const DEFAULT_METRICS = {
   fps: 0,
   avg_objects: 0,
+  total_vehicles: 0,
   objects_in_frame: 0,
   occupancy_pct: 0,
   pce_count: 0,
@@ -108,6 +110,7 @@ export default function VideoMode() {
   const [uploadedUrl, setUploadedUrl] = useState(null);
   const [annotating, setAnnotating] = useState(false);
   const [targetFps, setTargetFps] = useState(30);
+  const [avgWindow, setAvgWindow] = useState("minute");
   const [streamUrl, setStreamUrl] = useState(null);
   const [roi, setRoi] = useState(null);
   const [roiSource, setRoiSource] = useState(null);
@@ -122,7 +125,7 @@ export default function VideoMode() {
     if (!jobId) return;
     const timer = setInterval(async () => {
       try {
-        const status = await getVideoStatus(jobId);
+        const status = await getVideoStatus(jobId, { avgWindow });
         setJob(status);
         if (status.live_metrics) {
           setMetrics(status.live_metrics);
@@ -144,7 +147,7 @@ export default function VideoMode() {
     }, 1500);
 
     return () => clearInterval(timer);
-  }, [jobId]);
+  }, [jobId, avgWindow]);
 
   // Auto-play the uploaded video preview when available.
   useEffect(() => {
@@ -386,6 +389,23 @@ export default function VideoMode() {
     }
   }
 
+  async function handleExportMetrics() {
+    if (!jobId) return;
+    try {
+      const blob = await exportVideoMetrics(jobId, { avgWindow });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `traffic_metrics_${jobId}_${avgWindow}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || "Metrics export failed.");
+    }
+  }
+
   const currentRoiStyle = roiOverlayStyle();
 
   return (
@@ -542,13 +562,42 @@ export default function VideoMode() {
                 <p className="text-xs uppercase text-slate-400">Traffic Status</p>
                 <h3 className="text-lg font-semibold text-ink">Live Density</h3>
               </div>
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">
-                Live
-              </span>
+              <button
+                className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600 disabled:opacity-50"
+                onClick={handleExportMetrics}
+                disabled={!jobId}
+                type="button"
+              >
+                Export Excel
+              </button>
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 rounded-full bg-slate-100 p-1 text-xs">
+              {[
+                ["minute", "1 Min"],
+                ["hour", "1 Hour"],
+                ["all", "All"],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  className={`rounded-full px-2 py-1 font-medium ${
+                    avgWindow === value
+                      ? "bg-white text-ink shadow-soft"
+                      : "text-slate-500"
+                  }`}
+                  onClick={() => setAvgWindow(value)}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
             <div className="mt-4 grid gap-3">
-              <StatCard title="Avg Vehicles" value={metrics.avg_objects} />
+              <StatCard
+                title="Total Vehicles"
+                value={metrics.total_vehicles ?? metrics.avg_objects}
+              />
               <StatCard title="Active Objects" value={metrics.objects_in_frame} />
               <StatCard
                 title="PCE Count"
