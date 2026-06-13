@@ -32,6 +32,15 @@ const DEFAULT_METRICS = {
   objects_in_frame: 0,
   occupancy_pct: 0,
   pce_count: 0,
+  pce_density: 0,
+  vehicle_density: 0,
+  roi_area_ratio: 0,
+  roi_scale: 1,
+  avg_active_vehicles: 0,
+  avg_occupancy_pct: 0,
+  avg_pce_density: 0,
+  avg_vehicle_density: 0,
+  alert_score: 0,
   alert_label: "",
   alert_message: "",
 };
@@ -623,12 +632,26 @@ export default function VideoMode() {
               />
               <StatCard title="Active Objects" value={metrics.objects_in_frame} />
               <StatCard
-                title="PCE Count"
-                value={metrics.pce_count?.toFixed?.(2) ?? metrics.pce_count}
+                title="Avg Active"
+                value={
+                  metrics.avg_active_vehicles?.toFixed?.(2) ??
+                  metrics.avg_active_vehicles
+                }
               />
               <StatCard
-                title="Occupancy"
-                value={`${metrics.occupancy_pct?.toFixed?.(1) ?? metrics.occupancy_pct}%`}
+                title="PCE Density"
+                value={metrics.avg_pce_density?.toFixed?.(2) ?? metrics.avg_pce_density}
+              />
+              <StatCard
+                title="Avg Occupancy"
+                value={`${
+                  metrics.avg_occupancy_pct?.toFixed?.(1) ??
+                  metrics.avg_occupancy_pct
+                }%`}
+              />
+              <StatCard
+                title="Alert Score"
+                value={metrics.alert_score?.toFixed?.(2) ?? metrics.alert_score}
               />
             </div>
 

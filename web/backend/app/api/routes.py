@@ -43,7 +43,11 @@ from app.services.tracking import (
     repair_tracked_detections,
     tracks_to_detections,
 )
-from app.services.traffic_metrics import compute_metrics, decide_alert
+from app.services.traffic_metrics import (
+    build_traffic_metric_config,
+    compute_metrics,
+    decide_alert,
+)
 from app.services.video_jobs import VideoJob, process_video
 
 logger = logging.getLogger("app.stream")
@@ -64,6 +68,13 @@ ALLOWED_VIDEO_TYPES = {
 ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 AVG_WINDOW_SECONDS = {"minute": 60.0, "hour": 3600.0}
 UPLOAD_CHUNK_SIZE = 1024 * 1024
+TRAFFIC_METRIC_CONFIG = build_traffic_metric_config(settings)
+ALERT_MESSAGES = {
+    0: ("NORMAL", "Traffic is clear"),
+    1: ("BUSY", "Traffic is increasing"),
+    2: ("CONGESTED", "Localized congestion"),
+    3: ("GRIDLOCK", "Severe congestion"),
+}
 
 
 @dataclass
@@ -167,6 +178,14 @@ def _read_video_metadata(input_path: str) -> tuple[float, int]:
         raise HTTPException(status_code=400, detail="Cannot read video FPS")
 
     return fps, total_frames
+
+
+def _remove_file_if_exists(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        logger.warning("Failed to remove file: %s", path)
 
 
 def _start_video_processing(
@@ -318,6 +337,115 @@ def _flow_count_for_window(
             event for event in events if float(event.get("timestamp", 0.0)) >= cutoff
         ]
     return sum(1 for event in window_events if event.get("type") == event_type)
+
+
+def _history_rows_for_seconds(
+    history: list[dict[str, Any]],
+    window_seconds: float,
+    now: float,
+) -> list[dict[str, Any]]:
+    cutoff = now - max(float(window_seconds), 0.0)
+    return [
+        row for row in history
+        if float(row.get("timestamp", 0.0)) >= cutoff
+    ]
+
+
+def _average_rows(rows: list[dict[str, Any]], key: str) -> float:
+    if not rows:
+        return 0.0
+    return sum(float(row.get(key, 0.0)) for row in rows) / len(rows)
+
+
+def _rolling_alert_metrics(
+    history: list[dict[str, Any]],
+    now: float,
+) -> dict[str, float]:
+    window_sec = max(float(settings.alert_rolling_window_sec), 1.0)
+    rows = _history_rows_for_seconds(history, window_sec, now)
+    if not rows:
+        return {
+            "alert_window_sec": window_sec,
+            "avg_active_vehicles": 0.0,
+            "avg_occupancy_pct": 0.0,
+            "avg_pce_density": 0.0,
+            "avg_vehicle_density": 0.0,
+        }
+
+    return {
+        "alert_window_sec": window_sec,
+        "avg_active_vehicles": _average_rows(rows, "objects_in_frame"),
+        "avg_occupancy_pct": _average_rows(rows, "occupancy_pct"),
+        "avg_pce_density": _average_rows(rows, "pce_density"),
+        "avg_vehicle_density": _average_rows(rows, "vehicle_density"),
+    }
+
+
+def _apply_alert_hysteresis(job: VideoJob, proposed_level: int, now: float) -> int:
+    delay = max(float(settings.alert_hysteresis_sec), 0.0)
+    if job.live_alert_state is None:
+        job.live_alert_state = {
+            "current_level": proposed_level,
+            "candidate_level": None,
+            "candidate_since": now,
+        }
+        return proposed_level
+
+    current_level = int(job.live_alert_state.get("current_level", proposed_level))
+    if proposed_level == current_level or delay <= 0:
+        job.live_alert_state.update(
+            {
+                "current_level": proposed_level,
+                "candidate_level": None,
+                "candidate_since": now,
+            }
+        )
+        return proposed_level
+
+    candidate_level = job.live_alert_state.get("candidate_level")
+    candidate_since = float(job.live_alert_state.get("candidate_since", now))
+    if candidate_level != proposed_level:
+        job.live_alert_state.update(
+            {
+                "candidate_level": proposed_level,
+                "candidate_since": now,
+            }
+        )
+        return current_level
+
+    if now - candidate_since >= delay:
+        job.live_alert_state.update(
+            {
+                "current_level": proposed_level,
+                "candidate_level": None,
+                "candidate_since": now,
+            }
+        )
+        return proposed_level
+
+    return current_level
+
+
+def _trim_live_state(job: VideoJob) -> None:
+    if job.live_history is not None:
+        max_rows = max(int(settings.live_history_max_rows), 1)
+        if len(job.live_history) > max_rows:
+            del job.live_history[: len(job.live_history) - max_rows]
+
+    if job.live_flow_events is not None:
+        max_events = max(int(settings.live_flow_events_max_rows), 1)
+        if len(job.live_flow_events) > max_events:
+            del job.live_flow_events[: len(job.live_flow_events) - max_events]
+
+    if job.live_track_states is not None:
+        max_states = max(int(settings.live_track_states_max_rows), 1)
+        if len(job.live_track_states) > max_states:
+            ordered = sorted(
+                job.live_track_states.items(),
+                key=lambda item: float(item[1].get("last_seen", 0.0)),
+            )
+            for track_id, _state in ordered[: len(job.live_track_states) - max_states]:
+                del job.live_track_states[track_id]
 
 
 def _live_metrics_for_window(job: VideoJob, avg_window: str) -> dict[str, Any] | None:
@@ -599,8 +727,7 @@ def _update_live_metrics(
     roi_mask: np.ndarray,
 ) -> None:
     metrics = tracker.update(len(tracked))
-    occupancy, pce_total = compute_metrics(tracked, roi_mask)
-    alert_level, alert_message = decide_alert(occupancy, pce_total)
+    traffic_metrics = compute_metrics(tracked, roi_mask, TRAFFIC_METRIC_CONFIG)
     now = time.time()
     _update_flow_events(job, tracked, now, roi_mask.shape[1])
     flow_events = job.live_flow_events or []
@@ -625,15 +752,31 @@ def _update_live_metrics(
             for track in tracked
             if track.get("track_id") is not None
         ],
-        "occupancy_pct": round(occupancy, 2),
-        "pce_count": round(pce_total, 2),
-        "alert_level": alert_level,
-        "alert_label": alert_message[0],
+        "occupancy_pct": round(traffic_metrics["occupancy_pct"], 2),
+        "pce_count": round(traffic_metrics["pce_count"], 2),
+        "pce_density": round(traffic_metrics["pce_density"], 2),
+        "vehicle_density": round(traffic_metrics["vehicle_density"], 2),
+        "roi_area_ratio": round(traffic_metrics["roi_area_ratio"], 4),
+        "roi_scale": round(traffic_metrics["roi_scale"], 3),
     }
 
     if job.live_history is None:
         job.live_history = []
     job.live_history.append(metric_row)
+    _trim_live_state(job)
+
+    rolling_metrics = _rolling_alert_metrics(job.live_history, now)
+    proposed_alert_level, _proposed_alert_message, alert_score, alert_levels = decide_alert(
+        rolling_metrics["avg_occupancy_pct"],
+        rolling_metrics["avg_pce_density"],
+        rolling_metrics["avg_vehicle_density"],
+        TRAFFIC_METRIC_CONFIG,
+    )
+    alert_level = _apply_alert_hysteresis(job, proposed_alert_level, now)
+    alert_message = ALERT_MESSAGES[alert_level]
+    metric_row["alert_level"] = alert_level
+    metric_row["alert_label"] = alert_message[0]
+    metric_row["alert_score"] = round(alert_score, 2)
 
     total_vehicles = _total_vehicles_for_window(job.live_history, "minute", now)
     left_to_right = _flow_count_for_window(flow_events, "left_to_right", "minute", now)
@@ -647,8 +790,20 @@ def _update_live_metrics(
         "vehicles_in": left_to_right,
         "vehicles_out": right_to_left,
         "avg_window": "minute",
-        "occupancy_pct": round(occupancy, 2),
-        "pce_count": round(pce_total, 2),
+        "occupancy_pct": round(traffic_metrics["occupancy_pct"], 2),
+        "pce_count": round(traffic_metrics["pce_count"], 2),
+        "pce_density": round(traffic_metrics["pce_density"], 2),
+        "vehicle_density": round(traffic_metrics["vehicle_density"], 2),
+        "roi_area_ratio": round(traffic_metrics["roi_area_ratio"], 4),
+        "roi_scale": round(traffic_metrics["roi_scale"], 3),
+        "avg_active_vehicles": round(rolling_metrics["avg_active_vehicles"], 2),
+        "avg_occupancy_pct": round(rolling_metrics["avg_occupancy_pct"], 2),
+        "avg_pce_density": round(rolling_metrics["avg_pce_density"], 2),
+        "avg_vehicle_density": round(rolling_metrics["avg_vehicle_density"], 2),
+        "alert_window_sec": round(rolling_metrics["alert_window_sec"], 2),
+        "alert_score": round(alert_score, 2),
+        "alert_levels": alert_levels,
+        "proposed_alert_level": proposed_alert_level,
         "alert_level": alert_level,
         "alert_label": alert_message[0],
         "alert_message": alert_message[1],
@@ -712,7 +867,11 @@ async def upload_video(
     _validate_upload(file, ALLOWED_VIDEO_TYPES, ALLOWED_VIDEO_EXTS, "video")
     max_bytes = max(int(settings.max_video_upload_mb), 1) * 1024 * 1024
     input_path = _save_upload(file, max_bytes=max_bytes)
-    fps, total_frames = _read_video_metadata(input_path)
+    try:
+        fps, total_frames = _read_video_metadata(input_path)
+    except HTTPException:
+        _remove_file_if_exists(input_path)
+        raise
 
     job = router.video_jobs.create()  # type: ignore[attr-defined]
     job.fps = fps

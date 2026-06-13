@@ -4,6 +4,7 @@ import logging
 import time
 from importlib.util import find_spec
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import numpy as np
@@ -31,6 +32,7 @@ class InferenceEngine:
         self.model_format = self._resolve_model_format(self.model_path)
         self._validate_runtime_dependencies()
         self.model = YOLO(model_path)
+        self._predict_lock = Lock()
         self.device = self._resolve_device()
         self._move_model_to_device()
         self._configure_runtime()
@@ -133,7 +135,11 @@ class InferenceEngine:
     # Run inference and return detections with elapsed time in ms.
     def detect(self, frame: np.ndarray) -> tuple[list[dict[str, Any]], float]:
         start = time.perf_counter()
-        results = self.model.predict(**self._predict_kwargs(frame))
+        if settings.inference_lock_enabled:
+            with self._predict_lock:
+                results = self.model.predict(**self._predict_kwargs(frame))
+        else:
+            results = self.model.predict(**self._predict_kwargs(frame))
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
         detections: list[dict[str, Any]] = []

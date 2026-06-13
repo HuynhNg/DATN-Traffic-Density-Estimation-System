@@ -357,6 +357,7 @@ APP_IOU=0.45
 APP_IMG_SIZE=640
 APP_DEVICE=auto
 APP_USE_HALF=true
+APP_INFERENCE_LOCK_ENABLED=true
 APP_FRAME_SKIP=1
 APP_JPEG_QUALITY=85
 APP_STREAM_MAX_DIM=640
@@ -365,6 +366,34 @@ APP_MAX_VIDEO_UPLOAD_MB=500
 APP_CLEAN_STORAGE_ON_STARTUP=true
 APP_AUTO_PROCESS_VIDEO=false
 APP_LOG_DETECTIONS=false
+APP_LIVE_HISTORY_MAX_ROWS=108000
+APP_LIVE_FLOW_EVENTS_MAX_ROWS=50000
+APP_LIVE_TRACK_STATES_MAX_ROWS=10000
+APP_PCE_MOTOR=0.30
+APP_PCE_CAR=1.00
+APP_PCE_TRUCK=2.50
+APP_PCE_BUS=3.00
+APP_ALERT_ROLLING_WINDOW_SEC=60
+APP_ALERT_REFERENCE_ROI_AREA_RATIO=0.35
+APP_ALERT_MIN_ROI_AREA_RATIO=0.10
+APP_ALERT_MIN_ROI_SCALE=0.50
+APP_ALERT_MAX_ROI_SCALE=2.50
+APP_ALERT_OCC_LOW=15
+APP_ALERT_OCC_MID=30
+APP_ALERT_OCC_HIGH=50
+APP_ALERT_PCE_DENSITY_LOW=6
+APP_ALERT_PCE_DENSITY_MID=12
+APP_ALERT_PCE_DENSITY_HIGH=20
+APP_ALERT_VEHICLE_DENSITY_LOW=5
+APP_ALERT_VEHICLE_DENSITY_MID=10
+APP_ALERT_VEHICLE_DENSITY_HIGH=18
+APP_ALERT_OCCUPANCY_WEIGHT=0.40
+APP_ALERT_PCE_DENSITY_WEIGHT=0.40
+APP_ALERT_VEHICLE_DENSITY_WEIGHT=0.20
+APP_ALERT_SCORE_BUSY=0.75
+APP_ALERT_SCORE_CONGESTED=1.50
+APP_ALERT_SCORE_GRIDLOCK=2.30
+APP_ALERT_HYSTERESIS_SEC=3.0
 ```
 
 `APP_MAX_VIDEO_UPLOAD_MB` limits `/api/video/upload`; files above this size are
@@ -372,9 +401,33 @@ rejected with HTTP `413`. `APP_CLEAN_STORAGE_ON_STARTUP=true` clears old
 uploads and generated artifacts inside `APP_SAVE_DIR` every time the backend
 starts.
 
+`APP_INFERENCE_LOCK_ENABLED=true` serializes calls to the shared YOLO model
+instance, which prevents realtime streaming and offline processing from calling
+the same model concurrently. The `APP_LIVE_*_MAX_ROWS` options cap in-memory
+realtime history, direction events, and track state data so long-running streams
+do not grow memory indefinitely. Realtime `All` metrics and exports are based on
+the history still retained in memory.
+
 `APP_AUTO_PROCESS_VIDEO=false` avoids running offline video processing at the
 same time as the realtime MJPEG stream. Enable it only when you explicitly need
 processed MP4 files to be generated immediately after upload.
+
+Realtime density alerts use rolling averages over
+`APP_ALERT_ROLLING_WINDOW_SEC`, not a single frame. `APP_PCE_*` sets the PCE
+weight per class. PCE and active vehicle counts are normalized by ROI size using:
+
+```text
+roi_scale = APP_ALERT_REFERENCE_ROI_AREA_RATIO
+            / max(current_roi_area_ratio, APP_ALERT_MIN_ROI_AREA_RATIO)
+roi_scale is clamped to APP_ALERT_MIN_ROI_SCALE..APP_ALERT_MAX_ROI_SCALE
+```
+
+The alert score combines average occupancy, ROI-normalized PCE density, and
+ROI-normalized active vehicle density with the configured weights. This keeps a
+small ROI from using the same raw PCE thresholds as a large ROI.
+`APP_ALERT_HYSTERESIS_SEC` requires a new alert level to stay stable for a short
+period before the displayed label changes, reducing alert flicker near
+thresholds.
 
 Set `APP_LOG_DETECTIONS=true` while debugging ByteTrack. The backend logs each
 stream frame's bounding boxes before ROI filtering, after ROI filtering, and
@@ -462,6 +515,12 @@ require ByteTrack to be enabled so the same physical vehicle keeps a stable
 `track_id` across frames. If no `track_id` is available, the backend falls back
 to the latest active object count because it cannot reliably know whether a
 detection in two frames is the same vehicle.
+
+Density alerts use a different value: `Avg Active` is the average number of
+vehicles present per processed frame in the alert rolling window. `PCE Density`
+is the rolling average of PCE after ROI-size normalization, and `Avg Occupancy`
+is the rolling average of bbox-covered ROI area. These rolling metrics drive
+the alert label and alert score.
 
 ## API Reference
 

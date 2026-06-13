@@ -38,6 +38,18 @@ class LiveMetrics(BaseModel):
     vehicles_out: int | None = None
     objects_in_frame: int
     pce_count: float | None = None
+    pce_density: float | None = None
+    vehicle_density: float | None = None
+    roi_area_ratio: float | None = None
+    roi_scale: float | None = None
+    avg_active_vehicles: float | None = None
+    avg_occupancy_pct: float | None = None
+    avg_pce_density: float | None = None
+    avg_vehicle_density: float | None = None
+    alert_window_sec: float | None = None
+    alert_score: float | None = None
+    alert_levels: dict | None = None
+    proposed_alert_level: int | None = None
     occupancy_pct: float | None = None
     alert_level: int | None = None
     alert_label: str | None = None
