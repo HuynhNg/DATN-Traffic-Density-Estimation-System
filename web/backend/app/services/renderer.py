@@ -14,6 +14,7 @@ COLOR_MAP = {
 }
 
 
+# Render bounding boxes with optional labels and confidence.
 def render_boxes(
     frame: np.ndarray,
     detections: list[dict[str, Any]],
@@ -28,7 +29,8 @@ def render_boxes(
         cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
 
         if show_labels:
-            text = label
+            track_id = det.get("track_id")
+            text = f"{label} #{track_id}" if track_id is not None else label
             if show_conf:
                 text += f" {det['confidence']:.2f}"
             (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)

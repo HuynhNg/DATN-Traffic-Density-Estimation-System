@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 
+# Resize a frame so its longest side does not exceed max_dim.
 def resize_to_max(frame: np.ndarray, max_dim: int) -> np.ndarray:
     if max_dim <= 0:
         return frame
