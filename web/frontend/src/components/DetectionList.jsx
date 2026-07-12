@@ -3,8 +3,8 @@ export default function DetectionList({ detections }) {
   return (
     <div className="glass h-full rounded-2xl p-4 shadow-soft">
       <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-base font-semibold">Detections</h3>
-        <span className="text-xs text-slate-500">{detections.length} objects</span>
+        <h3 className="text-base font-semibold">Kết quả nhận diện</h3>
+        <span className="text-xs text-slate-500">{detections.length} đối tượng</span>
       </div>
       <div className="space-y-2 overflow-y-auto pr-2" style={{ maxHeight: 320 }}>
         {detections.map((det) => (

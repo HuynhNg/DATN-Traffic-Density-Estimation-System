@@ -8,7 +8,6 @@ import {
   uploadVideo,
 } from "../api/client.js";
 import Toggle from "../components/Toggle.jsx";
-import StatCard from "../components/StatCard.jsx";
 import ChartPanel from "../components/ChartPanel.jsx";
 import {
   MAX_VIDEO_UPLOAD_MB,
@@ -18,7 +17,7 @@ import {
 } from "../utils/fileTypes.js";
 
 const PREVIEW_PANEL_CLASS =
-  "mt-6 flex h-[420px] items-center justify-center rounded-2xl border " +
+  "mt-2 flex min-h-0 flex-1 items-center justify-center rounded-2xl border " +
   "border-dashed border-slate-200 bg-white/70";
 
 const DEFAULT_METRICS = {
@@ -45,6 +44,34 @@ const DEFAULT_METRICS = {
   alert_message: "",
 };
 
+function formatNumber(value, digits = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  return numeric.toFixed(digits);
+}
+
+function getAlertCopy(label, message) {
+  const normalized = String(label || "").toUpperCase();
+  const titleByLevel = {
+    NORMAL: "Thông thoáng",
+    BUSY: "Đông đúc",
+    CONGESTED: "Ùn tắc",
+    GRIDLOCK: "Tắc nghẽn",
+  };
+
+  if (!normalized) {
+    return {
+      title: "Chưa có dữ liệu",
+      message: "Tải video và chạy AI để bắt đầu đánh giá",
+    };
+  }
+
+  return {
+    title: titleByLevel[normalized] || label,
+    message,
+  };
+}
+
 function getAlertTone(level) {
   switch (level) {
     case 1:
@@ -56,6 +83,24 @@ function getAlertTone(level) {
     default:
       return "bg-emerald-50 text-emerald-800 border-emerald-200";
   }
+}
+
+function MetricGroup({ title, items }) {
+  return (
+    <div className="glass rounded-xl px-3 py-2 shadow-soft">
+      <p className="text-[10px] uppercase leading-none text-slate-400">{title}</p>
+      <div className="mt-2 grid grid-cols-2 divide-x divide-slate-200">
+        {items.map((item, index) => (
+          <div key={item.label} className={index === 0 ? "pr-3" : "pl-3"}>
+            <p className="text-[11px] leading-none text-slate-400">{item.label}</p>
+            <p className="mt-1 text-base font-semibold leading-none text-ink">
+              {item.value}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function clampPoint(point) {
@@ -137,6 +182,8 @@ export default function VideoMode() {
   const [error, setError] = useState(null);
 
   const alertTone = getAlertTone(metrics.alert_level);
+  const alertCopy = getAlertCopy(metrics.alert_label, metrics.alert_message);
+  const alertScore = formatNumber(metrics.alert_score, 2);
 
   // Poll job status for progress and live metrics.
   useEffect(() => {
@@ -433,14 +480,14 @@ export default function VideoMode() {
   const currentRoiStyle = roiOverlayStyle();
 
   return (
-    <section className="grid gap-6">
-      <div className="space-y-6">
-        <div className="grid gap-6 lg:grid-cols-[1.6fr_0.7fr]">
-          <div className="glass rounded-3xl p-6 shadow-soft">
-            <div className="flex flex-wrap items-center justify-between gap-4">
+    <section className="h-[calc(100dvh-5.75rem)] overflow-hidden">
+      <div className="h-full min-h-0">
+        <div className="grid h-full min-h-0 items-start gap-3 lg:grid-cols-[1.75fr_0.65fr]">
+          <div className="glass flex h-full min-h-0 flex-col rounded-3xl p-4 shadow-soft">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <label className="rounded-full bg-ink px-4 py-2 text-sm font-medium text-white">
-                  Upload Video
+                  Tải video
                   <input
                     type="file"
                     accept={VIDEO_ACCEPT}
@@ -457,7 +504,7 @@ export default function VideoMode() {
                       onClick={startUploadStream}
                       disabled={annotating}
                     >
-                      Run AI
+                      Chạy AI
                     </button>
                     <button
                       className={`rounded-full px-3 py-2 text-sm ${
@@ -466,31 +513,32 @@ export default function VideoMode() {
                       onClick={stopAnnotatedStream}
                       disabled={!annotating}
                     >
-                      Stop AI
+                      Dừng AI
                     </button>
                   </div>
                 )}
               </div>
               <div className="flex items-center gap-4">
-                <Toggle label="Labels" checked={labels} onChange={setLabels} />
-                <Toggle label="Conf" checked={conf} onChange={setConf} />
+                <Toggle label="Nhãn" checked={labels} onChange={setLabels} />
+                <Toggle label="Độ tin cậy" checked={conf} onChange={setConf} />
                 <div className="flex items-center gap-2 text-sm text-slate-500">
-                  <span>Target FPS</span>
+                  <span>FPS</span>
                   <input
                     type="number"
                     min="1"
                     max="60"
                     value={targetFps}
                     onChange={(e) => setTargetFps(Number(e.target.value) || 1)}
-                    className="w-16 rounded-md border border-slate-200 bg-white px-2 py-1"
+                    className="w-14 rounded-md border border-slate-200 bg-white px-2 py-1"
                   />
                 </div>
               </div>
             </div>
 
             <div ref={panelRef} className={`${PREVIEW_PANEL_CLASS} relative`}>
-              {error && <p className="text-rose-500">{error}</p>}
-              {streamUrl ? (
+              {error ? (
+                <p className="text-rose-500">{error}</p>
+              ) : streamUrl ? (
                 <>
                   <img
                     ref={streamImageRef}
@@ -539,13 +587,13 @@ export default function VideoMode() {
                     </svg>
                   )}
                   {roi && (
-                    <div className="absolute right-4 top-4 flex gap-2">
+                    <div className="absolute right-3 top-3 flex gap-2">
                       <button
                         className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-soft disabled:opacity-50"
                         onClick={handleAddRoiPoint}
                         type="button"
                       >
-                        Add Point
+                        Thêm điểm
                       </button>
                       <button
                         className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-600 shadow-soft disabled:opacity-50"
@@ -553,7 +601,7 @@ export default function VideoMode() {
                         disabled={roi.points.length <= 3}
                         type="button"
                       >
-                        Remove Point
+                        Xóa điểm
                       </button>
                       {roiSource === "manual" && (
                         <button
@@ -561,7 +609,7 @@ export default function VideoMode() {
                           onClick={handleResetRoi}
                           type="button"
                         >
-                          Reset ROI
+                          Đặt lại ROI
                         </button>
                       )}
                     </div>
@@ -575,16 +623,20 @@ export default function VideoMode() {
                   controls
                 />
               ) : (
-                <p className="text-slate-400">Upload a video to start</p>
+                <p className="text-slate-400">Tải video để bắt đầu</p>
               )}
+            </div>
+
+            <div className="mt-3">
+              <ChartPanel data={series} windowMode={avgWindow} />
             </div>
           </div>
 
-          <div className="glass rounded-3xl p-6 shadow-soft">
+          <div className="glass self-start rounded-3xl p-3 shadow-soft">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-xs uppercase text-slate-400">Traffic Status</p>
-                <h3 className="text-lg font-semibold text-ink">Live Density</h3>
+                <p className="text-[11px] uppercase text-slate-400">Trạng thái</p>
+                <h3 className="text-base font-semibold text-ink">Tổng quan</h3>
               </div>
               <button
                 className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-600 disabled:opacity-50"
@@ -592,15 +644,32 @@ export default function VideoMode() {
                 disabled={!jobId}
                 type="button"
               >
-                Export Excel
+                Xuất Excel
               </button>
             </div>
 
-            <div className="mt-4 grid grid-cols-3 rounded-full bg-slate-100 p-1 text-xs">
+            <div
+              className={`mt-2 rounded-2xl border px-3 py-2 shadow-soft ${alertTone}`}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase">{alertCopy.title}</p>
+                  {alertCopy.message && (
+                    <p className="mt-1 text-xs">{alertCopy.message}</p>
+                  )}
+                </div>
+                <div className="text-right">
+                  <p className="text-[10px] uppercase opacity-70">Điểm</p>
+                  <p className="text-xl font-semibold leading-none">{alertScore}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-2 grid grid-cols-3 rounded-full bg-slate-100 p-1 text-xs">
               {[
-                ["minute", "1 Min"],
-                ["hour", "1 Hour"],
-                ["all", "All"],
+                ["minute", "1 phút"],
+                ["hour", "1 giờ"],
+                ["all", "Tất cả"],
               ].map(([value, label]) => (
                 <button
                   key={value}
@@ -617,56 +686,62 @@ export default function VideoMode() {
               ))}
             </div>
 
-            <div className="mt-4 grid gap-3">
-              <StatCard
-                title="Total Vehicles"
-                value={metrics.total_vehicles ?? metrics.avg_objects}
+            <div className="mt-2 grid gap-2">
+              <MetricGroup
+                title="Lượt xe"
+                items={[
+                  {
+                    label: "Đã đếm",
+                    value: metrics.total_vehicles ?? metrics.avg_objects ?? 0,
+                  },
+                  {
+                    label: "Trong ROI",
+                    value: metrics.objects_in_frame ?? 0,
+                  },
+                ]}
               />
-              <StatCard
-                title="Left to Right"
-                value={metrics.vehicles_left_to_right ?? metrics.vehicles_in ?? 0}
+              <MetricGroup
+                title="Hướng di chuyển"
+                items={[
+                  {
+                    label: "Trái sang phải",
+                    value: metrics.vehicles_left_to_right ?? metrics.vehicles_in ?? 0,
+                  },
+                  {
+                    label: "Phải sang trái",
+                    value: metrics.vehicles_right_to_left ?? metrics.vehicles_out ?? 0,
+                  },
+                ]}
               />
-              <StatCard
-                title="Right to Left"
-                value={metrics.vehicles_right_to_left ?? metrics.vehicles_out ?? 0}
+              <MetricGroup
+                title="Mật độ trung bình"
+                items={[
+                  {
+                    label: "Số xe TB",
+                    value: formatNumber(metrics.avg_active_vehicles, 2),
+                  },
+                  {
+                    label: "PCE",
+                    value: formatNumber(metrics.avg_pce_density, 2),
+                  },
+                ]}
               />
-              <StatCard title="Active Objects" value={metrics.objects_in_frame} />
-              <StatCard
-                title="Avg Active"
-                value={
-                  metrics.avg_active_vehicles?.toFixed?.(2) ??
-                  metrics.avg_active_vehicles
-                }
-              />
-              <StatCard
-                title="PCE Density"
-                value={metrics.avg_pce_density?.toFixed?.(2) ?? metrics.avg_pce_density}
-              />
-              <StatCard
-                title="Avg Occupancy"
-                value={`${
-                  metrics.avg_occupancy_pct?.toFixed?.(1) ??
-                  metrics.avg_occupancy_pct
-                }%`}
-              />
-              <StatCard
-                title="Alert Score"
-                value={metrics.alert_score?.toFixed?.(2) ?? metrics.alert_score}
+              <MetricGroup
+                title="Hiệu suất xử lý"
+                items={[
+                  {
+                    label: "Độ phủ ROI (Occupancy)",
+                    value: `${formatNumber(metrics.avg_occupancy_pct, 1)}%`,
+                  },
+                  {
+                    label: "FPS",
+                    value: formatNumber(metrics.fps, 1),
+                  },
+                ]}
               />
             </div>
-
-            {metrics.alert_label && (
-              <div
-                className={`mt-4 rounded-2xl border px-4 py-3 text-sm shadow-soft ${alertTone}`}
-              >
-                <span className="font-semibold">{metrics.alert_label}</span>
-                <span className="ml-2">{metrics.alert_message}</span>
-              </div>
-            )}
           </div>
         </div>
-
-        <ChartPanel data={series} windowMode={avgWindow} />
       </div>
     </section>
   );

@@ -148,6 +148,21 @@ def _level(value: float, low: float, mid: float, high: float) -> int:
     return 3
 
 
+def _level_score(value: float, low: float, mid: float, high: float) -> float:
+    value = max(float(value), 0.0)
+    low = max(float(low), 1e-6)
+    mid = max(float(mid), low + 1e-6)
+    high = max(float(high), mid + 1e-6)
+
+    if value < low:
+        return value / low
+    if value < mid:
+        return 1.0 + (value - low) / (mid - low)
+    if value < high:
+        return 2.0 + (value - mid) / (high - mid)
+    return 3.0
+
+
 def decide_alert(
     occupancy: float,
     pce_density: float,
@@ -173,10 +188,28 @@ def decide_alert(
         metric_config.vehicle_density_mid,
         metric_config.vehicle_density_high,
     )
+    occ_score = _level_score(
+        occupancy,
+        metric_config.occ_low,
+        metric_config.occ_mid,
+        metric_config.occ_high,
+    )
+    pce_score = _level_score(
+        pce_density,
+        metric_config.pce_density_low,
+        metric_config.pce_density_mid,
+        metric_config.pce_density_high,
+    )
+    vehicle_score = _level_score(
+        vehicle_density,
+        metric_config.vehicle_density_low,
+        metric_config.vehicle_density_mid,
+        metric_config.vehicle_density_high,
+    )
     score = (
-        metric_config.occupancy_weight * occ_level
-        + metric_config.pce_density_weight * pce_level
-        + metric_config.vehicle_density_weight * vehicle_level
+        metric_config.occupancy_weight * occ_score
+        + metric_config.pce_density_weight * pce_score
+        + metric_config.vehicle_density_weight * vehicle_score
     )
     if score < metric_config.score_busy:
         level = 0
@@ -188,13 +221,18 @@ def decide_alert(
         level = 3
 
     messages = {
-        0: ("NORMAL", "Traffic is clear"),
-        1: ("BUSY", "Traffic is increasing"),
-        2: ("CONGESTED", "Localized congestion"),
-        3: ("GRIDLOCK", "Severe congestion"),
+        0: ("NORMAL", "Thông thoáng, lưu lượng xe thấp"),
+        1: ("BUSY", "Đông đúc, lưu lượng xe đang tăng"),
+        2: ("CONGESTED", "Ùn tắc, mật độ xe cao"),
+        3: ("GRIDLOCK", "Tắc nghẽn, giao thông quá tải"),
     }
     return level, messages[level], score, {
-        "occupancy": occ_level,
-        "pce_density": pce_level,
-        "vehicle_density": vehicle_level,
+        "occupancy": round(occ_score, 3),
+        "pce_density": round(pce_score, 3),
+        "vehicle_density": round(vehicle_score, 3),
+        "bands": {
+            "occupancy": occ_level,
+            "pce_density": pce_level,
+            "vehicle_density": vehicle_level,
+        },
     }

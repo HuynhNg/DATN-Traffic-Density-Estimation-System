@@ -70,10 +70,10 @@ AVG_WINDOW_SECONDS = {"minute": 60.0, "hour": 3600.0}
 UPLOAD_CHUNK_SIZE = 1024 * 1024
 TRAFFIC_METRIC_CONFIG = build_traffic_metric_config(settings)
 ALERT_MESSAGES = {
-    0: ("NORMAL", "Traffic is clear"),
-    1: ("BUSY", "Traffic is increasing"),
-    2: ("CONGESTED", "Localized congestion"),
-    3: ("GRIDLOCK", "Severe congestion"),
+    0: ("NORMAL", "Thông thoáng, lưu lượng xe thấp"),
+    1: ("BUSY", "Đông đúc, lưu lượng xe đang tăng"),
+    2: ("CONGESTED", "Ùn tắc, mật độ xe cao"),
+    3: ("GRIDLOCK", "Tắc nghẽn, giao thông quá tải"),
 }
 
 
